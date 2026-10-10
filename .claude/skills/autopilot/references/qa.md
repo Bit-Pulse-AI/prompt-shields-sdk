@@ -22,7 +22,7 @@ integration suite is skipped; see `LEARNINGS.md` for what that blocks.
 | `packages/sdk/**` | `PYTHONPATH=packages/sdk python3 -m pytest packages/sdk/tests/ -q` |
 | `packages/collector/**`, `packages/db/**` | `PYTHONPATH=packages:packages/collector python3 -m pytest packages/collector/tests/ -q`, `PYTHONPATH=packages python3 -m pytest packages/db/ -q`, and the integration suite |
 | integration (needs DB) | `PYTHONPATH=packages:packages/collector python3 -m pytest tests/ -q` |
-| `gateway/**` | `cd gateway && npm run test:gateway && npm run test:plugins`, plus `npm run format:check` only if it passed on `main` at the start of this tick (record which in the journal; a red `format:check` on `main` is a `regression` issue, not a reason to block every gateway PR) |
+| `gateway/**` | `cd gateway && npm run test:gateway && npm run test:plugins && npm run format:check` |
 | docs only | none, but check links and code samples still match the code |
 
 "Required suites" for a PR = every row whose area the PR touches, plus the SDK

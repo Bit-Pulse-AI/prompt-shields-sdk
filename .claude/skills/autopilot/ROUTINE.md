@@ -71,5 +71,7 @@ Autopilot never merges changes to this directory itself.
 - **Improve the loop:** review and merge (or close) the `autopilot:self-improve`
   PR. This is the only way the skill changes itself.
 - **Start slow:** `max_merges_per_tick` ships as 0. Read the reviews it writes
-  for a few days, then raise it to turn merging on. The dispatcher skips an
+  for a few days. To turn merging on, first give autopilot its own GitHub
+  identity and set `autopilot_login`, then raise `max_merges_per_tick` (rule 11
+  keeps merging off without one). The dispatcher skips an
   hour while the previous tick is still running, so ticks never overlap.

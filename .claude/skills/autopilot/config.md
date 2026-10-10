@@ -28,6 +28,7 @@ changes here in its self-improve PR, within the limits in `SKILL.md`.
 
 Create any that are missing on first use, except `autopilot:journal`: a human
 creates the journal issue and labels it (see `ROUTINE.md`).
+
 | Label | Meaning |
 |---|---|
 | `autopilot:ready` | Human-approved: autopilot may pick this issue up. |
@@ -51,7 +52,8 @@ removes `autopilot:pause` or `autopilot:needs-human` (SKILL.md rule 8).
 
 | Key | Value | Notes |
 |---|---|---|
-| `trusted_associations` | `OWNER`, `MEMBER`, `COLLABORATOR` | Only these users' comments, labels, reviews and locks count. |
+| `trusted_associations` | `OWNER`, `MEMBER`, `COLLABORATOR` | A cheap first filter only. |
+| `trusted_permissions` | `admin`, `maintain`, `write` | What actually makes a user trusted: their permission on this repository. |
 | `autopilot_login` | *(unset)* | Set to a dedicated bot account or GitHub App login once autopilot has one. Until then autopilot posts as a maintainer, so it cannot prove a label was added by a human; rule 8 and the journal's label log are the only guards. With it set, permission labels and reviews are checked against the event actor. |
 
 ## Instruction files
@@ -71,11 +73,8 @@ A PR is **high** risk if it touches any of these, otherwise **low**:
 - `packages/db/alembic/**`, `packages/db/models.py` — schema and migrations
 - Telemetry payload shapes: `packages/sdk/prompt_shields/**` event/telemetry
   fields, `gateway/src/middlewares/ps-telemetry.ts` — privacy contract
-- Upstream Portkey files in `gateway/` — fork divergence. Ours (not
-  upstream, so not high risk on this count): `gateway/src/middlewares/ps-*`,
-  `gateway/src/middlewares/router/**`, `gateway/src/middlewares/cache/**`,
-  `gateway/src/middlewares/PS_README.md`, and anything `gateway/FORK_NOTICE.md`
-  lists as added by Prompt Shields.
+- Upstream Portkey files in `gateway/` (anything not listed as added by
+  Prompt Shields in `gateway/FORK_NOTICE.md`) — fork divergence
 - Authentication / API keys: collector auth, `api_key_fingerprint`
 - Public SDK API removals or signature changes — semver
 - `LICENSE`, `NOTICE`, `gateway/LICENSE`, `SECURITY.md`

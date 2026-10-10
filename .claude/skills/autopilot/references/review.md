@@ -74,7 +74,10 @@ ticks can tell which head was reviewed, and end it with
 posted (edit the comment in phase 7 to fill it in). The merge gate only counts
 a review whose author is trusted (and is `autopilot_login`, when set) and whose
 `Tick:` link resolves to a journal `TICK` entry that lists this PR and SHA
-under `Reviewed:`. A look-alike comment from anyone else is ignored. Inline comments for blocking findings
+under `Reviewed:`. A look-alike comment from anyone else is ignored. Because
+the `TICK` entry is only posted in phase 7, a review never satisfies the merge
+gate in the tick that wrote it; the earliest merge is the next tick. That is
+intended. Inline comments for blocking findings
 are welcome. For an autopilot PR with blocking findings, phase 1 of the next
 tick (or this one, if budget remains) fixes them; the new head then needs a
 fresh review before merge.

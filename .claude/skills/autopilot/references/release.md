@@ -14,6 +14,8 @@ All must hold (values in `config.md`):
   `[Unreleased]` that concern the SDK (see "SDK entries" below).
 - No release PR already open (label `autopilot:release`). If one is open, go
   to step 3.
+- No open `Release sdk: breaking change needs a version decision` issue. If
+  one is open, a human still has to pick the version; do nothing this tick.
 
 ### SDK entries
 
