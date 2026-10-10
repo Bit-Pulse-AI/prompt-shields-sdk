@@ -1,363 +1,456 @@
-# PRD 0001 — SDK Model & Cost Optimizer
+# PRD 0001 — Prompt Shields Route: sensitivity-aware model & cost optimizer
 
 | | |
 |---|---|
-| **Status** | Draft — for review |
-| **Owner** | TBD |
-| **Milestone** | `SDK Model & Cost Optimizer` |
-| **Packages** | `packages/sdk` (primary), `gateway/src/middlewares/router` (policy parity), `packages/collector` + `packages/db` (new event fields) |
+| **Status** | Draft v2 — for review |
+| **Owner** | @Jun (product); engineering owner TBD |
+| **Guiding memo** | *Inference Layer Opportunity for Prompt Shields* (Oct 7, 2026) |
+| **Milestones** | [P0](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/1) · [Gate 1](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/2) · [P1](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/3) · [P2](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/4) · [P3](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/5) — backlog in [0001-milestone-backlog.md](0001-milestone-backlog.md) |
+| **Packages** | `packages/sdk`, `gateway/src/middlewares/{router,cache}`, `packages/collector`, `packages/db`, new `packages/teardown` |
 | **Last updated** | 2026-10-10 |
 
 ## 1. Summary
 
-Give the Python SDK an OpenRouter-style **model & cost optimizer**. One client
-should be able to call several providers with the developer's own keys, pick a
-model from a declared policy (quality intent, price ceiling, latency, data
-residency), fall back when a provider fails, enforce spend budgets, and report
-exact cost and provable savings into the registry.
+Prompt Shields already sits in the request path through the SDK and the gateway, and
+already knows *what kind of data* each call carries. This PRD turns that position into
+a **cost-optimisation layer**. It covers four capabilities:
 
-None of this needs a hosted hop. Today the same behaviour needs the gateway: the
-SDK only emits `X-PS-*` hints, and the gateway's `HeuristicStrategy` decides.
-This PRD adds a **local routing mode** to the SDK. It shares one policy and
-pricing catalog with the gateway, so the two can never disagree about what a
-model costs or which group it belongs to.
+- **Sensitivity-aware routing.** Regulated or PII-heavy calls go to a sovereign EU/Nordic
+  model. Routine calls go to the cheapest model that passes the customer's quality bar.
+  Hard calls go to a frontier model.
+- **Semantic caching.**
+- **Per-team spend governance.**
+- **Verified savings reporting.**
 
-## 2. Background — what exists today
+It is built as a **module of the existing product, not a pivot**. Security stays the
+moat. Savings open a second budget, so the buyer becomes **CISO + CFO** instead of the CISO alone.
+
+The first deliverable is not the router. It is an **AI bill teardown** toolkit. It
+replays a customer's anonymised logs offline through the routing policy and an
+evaluation harness, and reports savings at measured quality parity. That toolkit backs
+the 6-week market test in the memo. Online routing, which is most of the engineering,
+is built only once the memo's go criteria are met.
+
+## 2. Guiding principles (from the memo)
+
+These are product constraints. Every design decision below traces to one of them.
+
+| # | Principle | Design consequence |
+|---|---|---|
+| P1 | **Extend, don't pivot.** We are not an inference provider and not a generic EU router. | No token resale and no hosted multi-tenant inference endpoint. The router is a module of the SDK and gateway we already ship. |
+| P2 | **Security is the moat.** We route by *data sensitivity*; other routers route by price and latency. | Data-policy constraints run **before** any cost optimisation, and they fail closed. |
+| P3 | **Bring your own keys.** No working-capital risk, and no race over a 5% margin. | The customer's provider keys stay in the customer's process or gateway. The catalog lists providers but never proxies billing. |
+| P4 | **Prove savings, don't claim them.** The business model is a share of verified savings against an audited baseline. | Counterfactual cost, price-catalog versioning and per-customer quality evals are first-class features, not reporting add-ons. |
+| P5 | **Capacity is not our game.** EU providers run short of capacity. | Multi-provider failover is mandatory, not optional. The catalog treats Berget, Infercom, Mistral EU, Regolo, IONOS, STACKIT, Melious and EUrouter as **supply**. |
+| P6 | **Test before building.** | Phase 0 serves the teardown offer. Online routing is gated on the memo's go/kill criteria (§8). |
+| P7 | **Conservative on quality.** A cheaper model that fails on a regulated task is a liability. | Defaults favour quality. Downgrades require a per-customer eval pass. A content-filter refusal never triggers a fallback to a laxer model. |
+
+## 3. Context
+
+### 3.1 Market (summary of the memo; figures from secondary reports, validate before external use)
+
+- **Prices are falling fast.** Equivalent-capability inference prices fall about 50x per
+  year at the median. A usage-weighted token index reached about $0.97 per million tokens
+  in September 2026. Open-weight models carry about half of production tokens.
+- **Spend pain is still rising.** 98% of FinOps teams now manage AI spend, 72% of
+  organisations had a surprise AI bill, and about 26% of AI spend is estimated to be
+  wasted. Granular attribution is the top unmet need.
+- **Routing works.** RouteLLM reported 85% savings at 95% of GPT-4 quality on MT-Bench,
+  and industry reports range from 30% to 85%. *The cheapest token is rarely the cheapest
+  solved task.*
+- **The competitive lane:**
+  - Global routers (OpenRouter, OrcaRouter) lead on breadth and price.
+  - EU routers (Melious, EUrouter, Cortecs, Eden AI) route on price and latency, not on
+    sensitivity, and have no enterprise DLP.
+  - Portkey is closest to us (gateway + guardrails), but has no EU sovereignty or Purview story.
+  - AI FinOps tools (Vantage, Datadog and similar) report spend but cannot lower the
+    cost per request.
+
+**Our wedge:** we are the only player that is (a) already in the request path with
+CISO trust, (b) already classifying data sensitivity on every call, and (c) already
+attributing each call to a business unit and use case in a registry an auditor can read.
+
+### 3.2 What exists in this repository today
 
 | Capability | Where | State |
 |---|---|---|
 | Route hints (`RouteHint` → `X-PS-Quality`, `X-PS-Max-Cost`, `X-PS-Route`, `X-PS-Cache`) | `packages/sdk/prompt_shields/types.py` | Shipped. The SDK never routes. |
-| Cost-aware router (`HeuristicStrategy`, `RoutePolicy`, budget clamp) | `gateway/src/middlewares/router/` | Shipped behind `PS_ROUTER_ENABLED`. |
-| `requested_model` / `served_model` on events | `client.py`, `ps-telemetry.ts` | Shipped. |
-| Pricing table | `packages/sdk/prompt_shields/pricing.py` | 14 models, Q1-2026 snapshot, per-1k in/out only. |
-| Gateway pricing | `gateway/src/middlewares/router/policy.ts` | **Hand-copied** from `pricing.py`, so the two drift. |
+| Cost-aware router (`HeuristicStrategy`, `RoutePolicy`, budget clamp) | `gateway/src/middlewares/router/` | Shipped behind `PS_ROUTER_ENABLED`. Groups are cheap / balanced / frontier, with **no sensitivity input**. |
+| Exact-match response cache with `X-PS-Cache` on/off/refresh | `gateway/src/middlewares/cache/` | Shipped (simple mode only). |
+| PII category detection | `packages/sdk/prompt_shields/pii.py` | Regex and keyword based. The README states it is "a signal, not a DLP control". There are no Nordic identifiers (e.g. Norwegian fødselsnummer). |
+| Ownership attribution (`business_unit`, `use_case`, `owner`, `data_classification`) | SDK, gateway `X-PS-*` headers, registry | Shipped. This is the basis for spend attribution. |
+| `requested_model` / `served_model` | SDK + gateway telemetry | Shipped. |
+| Pricing | `pricing.py`, hand-copied into `router/policy.ts` | 14 models, Q1-2026, input/output only. |
 
-Gaps this milestone closes:
-
-1. **One vendor per client.** A `ShieldsClient` wraps exactly one upstream
-   SDK, so cross-provider routing or fallback is impossible without the gateway.
-2. **Cost is computed from the *requested* model** (`client.py`,
-   `_build_event`). A `model="auto"` call always records `cost=None`, and any
-   downgrade is priced at the wrong model's rate.
-3. **The pricing model is too coarse.** It has no cached-input, cache-write,
-   reasoning-token, long-context tier or batch pricing. Most of the 2026
-   savings levers live in exactly those columns.
-4. **Streaming records no usage.** It does not request `stream_options.include_usage`
-   and does not read Anthropic `message_delta` usage.
-5. **No fallback, retry policy, budgets or price ceilings** on the SDK path.
-6. **No savings evidence.** `requested_model` and `served_model` are recorded,
-   but nothing computes "what this would have cost on the requested model".
-
-## 3. Market research (condensed)
-
-| Product | Runs where | Key ideas we should adopt | Ideas we should not copy |
-|---|---|---|---|
-| **OpenRouter** | Hosted SaaS | `provider: { order, only, ignore, sort: price/latency/throughput, max_price, zdr, data_collection, quantizations, allow_fallbacks }`; `models: [...]` ordered fallback; exact `usage.cost` on every response; `:floor` / `:nitro` shorthands; Auto Router with an allow-list of candidate models; sticky provider routing to keep prompt caches warm. | A hosted middleman that sees prompts. It also takes a 5–5.5% fee. |
-| **LiteLLM** | SDK + proxy | `model_prices_and_context_window.json`, the de-facto price schema (about 4k entries, with cache, reasoning, tiered and batch columns); routing strategies (`simple-shuffle`, `latency-based`, `cost-based`, `least-busy`); separate `fallbacks` / `context_window_fallbacks` / `content_policy_fallbacks`; cooldowns; budgets per key, user, team and model. | Heavy proxy plus a Redis dependency for basic routing. |
-| **Portkey** (our gateway's upstream) | Gateway | Config `strategy.mode: fallback / loadbalance / conditional`; `on_status_codes`; simple and semantic cache. | — (already inherited by `gateway/`). |
-| **RouteLLM** (LMSYS, Apache-2.0) | Library | A strong-vs-weak learned router (`mf` matrix factorisation recommended) with a threshold calibrated to "% of calls sent to strong". Reported >2x cost reduction while keeping about 95% of GPT-4 quality on MT-Bench. | An embedding call on the hot path by default. |
-| **NotDiamond / Martian / Unify** | Hosted APIs | Pareto selection by quality, cost and latency, and custom routers trained on your own eval data. | Sending prompts to yet another third party. |
-| **Vercel / Cloudflare AI Gateway, Helicone** | Hosted / edge | Provider `order`/`only`/`sort`, dynamic routing splits, caching, OTel tracing. | — |
-
-**Our differentiation.** We are the only optimizer whose routing decisions,
-cost records and savings land in an **AI asset registry** that an auditor can read.
-Each record says which use case, business unit, data classification and model
-served it, and at what cost. Local mode keeps prompts inside the customer's
-process: routing runs with their keys, and nothing passes through a third party.
-
-The full research notes and sources are in [Appendix A](#appendix-a--sources).
+**Gaps:**
+1. **Cost is priced at the *requested* model, not the served one** (`client.py`,
+   `_build_event`). A `model="auto"` call records `cost=None`.
+2. **No cached-token, reasoning-token, long-context-tier or batch pricing.** Streaming
+   calls record no usage. Both make cost figures unfit for a savings-share contract.
+3. **No jurisdiction or hosting metadata** on models or providers, and no EU-sovereign providers.
+4. **The router has no sensitivity input,** and each SDK client is locked to one vendor.
+5. **No offline replay or eval tooling,** so savings cannot be shown before deployment.
+6. **No budgets and no anomaly alerts.**
 
 ## 4. Goals and non-goals
 
 ### Goals
 
-- **G1.** Route, fall back and enforce budgets across OpenAI, Anthropic and Google
-  Gemini from **one client**, with no gateway required.
-- **G2.** Make cost **accurate**: within ±2% of the provider-reported cost for
-  every model in the catalog, including cache, reasoning and streaming calls.
-- **G3.** Have **one source of truth** for pricing, model capabilities and routing
-  policy, used by both the SDK and the gateway.
-- **G4.** Make savings **provable** in the registry: a counterfactual cost on
-  every routed event, plus an aggregate savings report.
-- **G5.** Respect governance: a routing decision may never send data to a
-  provider, region or retention class that the call's `data_classification`
-  policy forbids.
-- **G6.** Stay drop-in. Existing `ShieldsOpenAI` / `ShieldsAnthropic` callers
-  see **zero behaviour change** unless they opt in.
+- **G1 Teardown.** A customer (or we, as a concierge service) can replay a week of logs
+  and get a savings report at measured quality parity within one working day.
+- **G2 Sensitivity-aware routing.** No call with declared or detected sensitivity
+  above the policy threshold is ever served outside its allowed jurisdiction. This
+  holds in the gateway and in SDK local mode.
+- **G3 Cheapest capable model.** Routine traffic is routed to the cheapest model that
+  passes the customer's quality bar, with multi-provider failover.
+- **G4 Auditable savings.** Every routed call carries a counterfactual cost against a
+  baseline frozen at onboarding. The savings report reconciles to provider invoices within ±2%.
+- **G5 Spend governance.** Per-team budgets, attribution by business unit and use case,
+  anomaly alerts, and an export for the Purview/Defender story.
+- **G6 Drop-in.** Existing `ShieldsOpenAI`, `ShieldsAnthropic` and gateway users see no
+  behaviour change unless they opt in.
 
-### Non-goals (this milestone)
+### Non-goals
 
-- A hosted, OpenRouter-style service, credits or billing. Prompt Shields does not
-  resell inference.
-- Semantic response caching in the SDK. It stays in the gateway (`middlewares/cache`).
-- Prompt compression (LLMLingua-style). It conflicts with prefix caching and is
-  out of scope.
-- A production learned router. Phase 4 ships only an **experimental** adapter
-  and a data-export path.
-- A TypeScript SDK. Only the Partner API client exists in TS today.
-- Embeddings, images, audio and batch-API routing. Chat/messages only.
+- Operating GPUs, reselling tokens, prepaid credits or a hosted public router endpoint (P1, P3).
+- Competing on model breadth with OpenRouter. The catalog covers models our customers use,
+  plus sovereign supply.
+- **Prompt rewriting or anonymisation in v1.** "Anonymise, then route" is the memo's
+  long-term unlock. The current PII engine is not reliable enough to *transform* prompts
+  safely. It is scoped as a gated Phase 3 item (§7.9).
+- A TypeScript application SDK, and routing for embeddings, images or audio.
 
-## 5. Users and use cases
+## 5. Users
 
-| Persona | Job to be done |
-|---|---|
-| **App developer** | "Give me the cheapest model that is good enough for this call, and fail over if OpenAI is down, without me writing retry code." |
-| **Platform / FinOps** | "Cap the HR screening use case at $500/month and downgrade instead of failing when it gets close." |
-| **Security / governance** | "Confidential data may only go to providers with ZDR in the EU, and I need evidence that routing honoured it." |
-| **Engineering leadership** | "Show me how much routing saved last quarter, per business unit." |
-
-## 6. Product design
-
-### 6.1 Developer experience
-
-The existing clients are unchanged. The new entry point is a multi-provider
-client that uses OpenRouter-style `vendor/model` identifiers:
-
-```python
-from prompt_shields import ShieldsRouter, RoutePolicy, Budget
-
-client = ShieldsRouter(
-    providers={                       # BYOK — keys never leave the process
-        "openai":    {"api_key": os.environ["OPENAI_API_KEY"]},
-        "anthropic": {"api_key": os.environ["ANTHROPIC_API_KEY"]},
-        "google":    {"api_key": os.environ["GEMINI_API_KEY"]},
-    },
-    ps_api_key="ps-...",
-    business_unit="HR", use_case="interview-screening",
-    data_classification="confidential",
-    policy=RoutePolicy.load("ps-routing.yaml"),   # optional; sane default bundled
-    budget=Budget(usd=500, period="month", on_exceed="downgrade"),
-)
-
-# 1. Let the optimizer choose (OpenRouter "auto")
-resp = client.chat.completions.create(
-    model="auto",
-    messages=[...],
-    route=RouteHint(quality="draft", max_cost=0.005),
-)
-
-# 2. Ordered fallback list (OpenRouter `models: [...]`)
-resp = client.chat.completions.create(
-    models=["anthropic/claude-sonnet-4-5", "openai/gpt-4o", "google/gemini-2.5-pro"],
-    messages=[...],
-)
-
-# 3. Provider preferences (OpenRouter `provider: {...}`)
-resp = client.chat.completions.create(
-    model="auto",
-    messages=[...],
-    provider=ProviderPrefs(sort="price", only=["openai", "anthropic"],
-                           max_price={"input": 3.0, "output": 15.0},  # USD / 1M tok
-                           require=["tools", "json_schema"]),
-)
-
-resp.ps.route        # RouteDecision(model=..., group=..., reason=..., est_cost=...)
-resp.ps.cost         # CostBreakdown(input=..., cached_input=..., output=..., reasoning=..., total=..., source="reported"|"estimated")
-resp.ps.attempts     # [Attempt(model="openai/gpt-4o", error="429"), Attempt(model="anthropic/...", ok=True)]
-```
-
-- **Response shape.** The response is always an **OpenAI chat-completions shape**,
-  whichever provider served it, because that is the lingua franca OpenRouter
-  established. A `raw` attribute keeps the native provider object.
-  `ShieldsAnthropic` callers who want the native Anthropic shape keep using
-  `ShieldsAnthropic`.
-- **Gateway mode** stays available: `ShieldsRouter(mode="gateway", base_url=...)`
-  sends the existing `X-PS-*` hints and lets the gateway decide. Local mode is the default.
-
-### 6.2 Model & pricing catalog (`prompt_shields.catalog`)
-
-- **Schema.** Field-compatible with LiteLLM's `model_prices_and_context_window.json`:
-  - per-token `input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h` and `reasoning` prices
-  - `*_above_200k` long-context tiers
-  - `batch` / `flex` / `priority` service tiers
-  - `max_input_tokens`, `max_output_tokens`
-  - capability flags: `tools`, `json_schema`, `vision`, `reasoning`, `prompt_caching`
-  - `regions`, `zdr_available`
-- **Ships as `catalog.json`**, a versioned and dated snapshot inside the wheel.
-  Every event records `price_catalog_version`.
-- **Optional refresh.** `catalog.refresh(url=..., ttl=24h)` fetches a signed
-  catalog and pins it with an ETag. It is off by default so that air-gapped
-  installs work.
-- **One generator** (`scripts/build_catalog.py`) writes both the SDK
-  `catalog.json` and the gateway's `defaultPolicy` pricing. CI fails if the two drift.
-- An unknown model reports cost as **`None` ("unmetered")**, never `0`. This
-  keeps today's contract.
-- `pricing.estimate_cost()` stays as a thin, backward-compatible wrapper over the catalog.
-
-### 6.3 Router (`prompt_shields.routing`)
-
-A Python port of the gateway's `RouterStrategy` interface, so the two share semantics:
-
-```
-RouteRequest(messages, requested_model, est_input_tokens, max_output_tokens,
-             quality, max_cost, explicit_group, provider_prefs, data_policy)
-  -> filter   : capability (tools/json_schema/context window), data policy
-                (region, ZDR, classification allow-list), provider only/ignore,
-                max_price, circuit-breaker state
-  -> strategy : HeuristicStrategy (port of gateway) | CostStrategy (cheapest) |
-                LatencyStrategy (EWMA p50) | custom callable
-  -> budget   : clamp to max_cost / remaining budget (downgrade across groups)
-  -> RouteDecision(model, group, reason, est_cost, candidates=[...ordered fallbacks])
-```
-
-- **Precedence** is identical to the gateway:
-  explicit `model_group` > `quality` / `max_cost` hints > policy default.
-- **Engagement** is identical too. Routing only engages for `model="auto"`,
-  `models=[...]` or a non-empty hint. A concrete model with no hint is sent as-is.
-- **Token estimate.** Use `tiktoken` when it is installed (`[optimizer]` extra),
-  otherwise ~4 chars/token. Provider-reported usage always overrides the estimate afterwards.
-- **Overhead budget.** p50 < 1 ms and p99 < 5 ms for rule-based strategies, with
-  no network I/O on the hot path.
-
-### 6.4 Fallback & retry engine
-
-| Condition | Default action |
-|---|---|
-| 429 / rate-limit | Respect `Retry-After` up to `max_wait`, then move to the next candidate |
-| 5xx, timeout, connection error | Next candidate. Open a circuit breaker after N failures in a window (cooldown) |
-| Context-length exceeded | Next candidate with a larger `max_input_tokens` |
-| 400 / 401 / 403 (bad request, auth) | **Do not fall back.** Raise. |
-| Provider content-policy refusal | **Do not fall back by default** (`fallback_on_content_filter=False`). Routing a refused prompt to a laxer model is a policy-evasion path. If enabled, it is recorded on the event. |
-| Stream already emitting tokens | **Never retry.** Raise the mid-stream error so the caller doesn't get duplicated output or double billing. |
-
-Before choosing a fallback target, the engine checks capability compatibility:
-tools, `response_format` and vision must be supported by the target.
-
-### 6.5 Budgets & guardrails on spend
-
-- **Scopes.** `Budget(usd, period=day|week|month, scope=client|use_case|user_id)`.
-- **Pre-call check.** Worst-case estimate = input estimate + `max_tokens` ×
-  output price. After the call, reconcile against reported usage.
-- **`on_exceed` options.**
-  - `"raise"` raises `BudgetExceeded`.
-  - `"downgrade"` re-routes to the cheapest group that fits.
-  - `"warn"` proceeds and emits `budget_state="exceeded"`.
-- **Default store** is in-process, which means one counter per process.
-  `BudgetStore` is a protocol, and a Redis implementation ships behind an extra
-  for multi-replica deployments. The docs must say plainly that the in-process
-  store is per process. That is consistent with how the README states limits.
-- **`max_price`** (per-token ceiling) and **`max_cost`** (per-call ceiling) are
-  separate knobs, mirroring OpenRouter and `X-PS-Max-Cost`.
-
-### 6.6 Accurate cost accounting
-
-- Price the call at the **served** model. This fixes gap 2.
-- Read cached and reasoning tokens:
-  - OpenAI: `prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens`
-  - Anthropic: `cache_read_input_tokens`, `cache_creation_input_tokens`
-  - Gemini: `cachedContentTokenCount`
-- **Streaming.**
-  - OpenAI: inject `stream_options={"include_usage": True}`.
-  - Anthropic: accumulate `message_start` and `message_delta` usage.
-  - Emit the event on stream close. Aborted streams are emitted with
-    `cost_source="estimated"`.
-- `CostBreakdown` is attached to the response (`resp.ps.cost`) and to the event.
-
-### 6.7 Telemetry & savings
-
-New **optional** event fields. All are metadata, with no prompt content, as
-CONTRIBUTING requires.
-
-| Field | Type | Purpose |
+| Persona | Job to be done | What they buy |
 |---|---|---|
-| `route_group`, `route_reason`, `route_est_cost` | str, str, float | Parity with gateway events |
-| `route_mode` | `local` \| `gateway` \| `none` | Which component decided |
-| `fallback_chain` | list[{model, error_class}] | Reliability evidence. Error class only, never the message body. |
-| `cost_breakdown` | {input, cached_input, cache_write, output, reasoning} | Accurate cost |
-| `cost_source` | `reported` \| `estimated` | Honesty about streaming and aborted calls |
-| `counterfactual_cost` | float \| null | Cost had `requested_model` (or the policy's `baseline_model` for `auto`) served the call |
-| `price_catalog_version` | str | Reproducibility |
-| `served_provider`, `served_region` | str | Proof of data-policy compliance |
-| `budget_state` | `ok` \| `near` \| `exceeded` \| `downgraded` | FinOps |
+| **CISO / DPO** | "Confidential and personal data never leaves the EEA. I can prove it per call." | The sensitivity policy, evidence of where each call was served |
+| **CFO / FinOps** | "Cut the AI bill, attribute it to teams, and stop surprise bills." | Teardown report, budgets, anomaly alerts, savings report |
+| **Platform engineer** | "One policy, enforced at the gateway, with no per-team code changes." | Gateway router + cache + policy file |
+| **App developer** | "Cheapest good-enough model, with failover, and no retry code." | SDK `ShieldsRouter` / `model="auto"` |
 
-- **Collector and DB.** Add nullable columns via an Alembic migration (`004_routing_cost.py`).
-- **Registry API.** Extend `GET /assets/{id}/usage-summary` with `savings_usd`,
-  `fallback_rate` and `cost_by_model`.
-- **OTel (optional extra).** Emit `gen_ai.*` semantic-convention spans
-  (`gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`,
-  `gen_ai.usage.*`) and put the routing and cost attributes under `prompt_shields.*`.
-  Pin the semconv version, because the spec is still in Development status.
+## 6. Architecture
 
-### 6.8 Policy file (shared SDK ⇄ gateway)
+### 6.1 One policy, three enforcement points
 
-Model IDs below are illustrative; the bundled default is generated from the catalog.
+```
+                 route-policy.v1  (YAML/JSON, one schema, versioned)
+                 model catalog    (prices + capabilities + jurisdiction)
+                        |
+      +-----------------+------------------+
+      v                 v                  v
+ Offline replay     Gateway router      SDK local mode
+ (teardown CLI)     (org-wide,          (teams without the gateway;
+  Phase 0           zero code change)    ShieldsRouter)
+                     Phase 1             Phase 1
+```
+
+The policy schema, the catalog and a set of **golden decision vectors** are the
+contract. The Python implementation (SDK and teardown) and the TypeScript implementation
+(gateway) must both pass the same vectors in CI. Code is never copied across the
+MIT/Apache boundary (see CONTRIBUTING). Only data files are shared.
+
+### 6.2 Request flow
+
+```
+Intercept -> Classify -> Constrain -> Route -> Cache -> Call (+failover) -> Record
+             sensitivity  jurisdiction  cheapest     tenant-   provider        cost, counterfactual,
+             + complexity allow-list    capable      scoped    failover        served jurisdiction
+```
+
+1. **Intercept.** Through the SDK, the gateway, or (offline) a log file.
+2. **Classify.**
+   - *Sensitivity* = max(declared `data_classification`, PII-escalated level). It is
+     **escalate-only**: detection can raise sensitivity but never lower it. An unknown
+     or failed classification counts as the policy's `unclassified_default`, which is
+     `confidential` out of the box.
+   - *Complexity* uses the existing heuristic (tokens, code, schema), with a learned
+     classifier later. Target under 10 ms.
+3. **Constrain.** The sensitivity level maps to allowed jurisdictions, providers, ZDR
+   and residency. Candidates outside the allow-list are removed. **If none remain, the
+   call fails closed** with `PolicyViolation`. It is never downgraded to a non-compliant model.
+4. **Route.** Among the remaining candidates that meet the use case's quality bar, pick
+   by strategy (cheapest, latency, or balanced) within `max_cost` and the budget.
+5. **Cache.** The cache is tenant-scoped. It is off by default for sensitivity ≥
+   `confidential`. Flagged responses are never cached.
+6. **Call + failover.** Fall back within the same constraint set only (§7.5).
+7. **Record.** Telemetry carries the served model, provider and jurisdiction, the cost
+   breakdown, the counterfactual cost and the policy version.
+
+## 7. Components
+
+### 7.1 Model & provider catalog (`catalog.json`, shared data file)
+
+- **Prices.** The schema is field-compatible with LiteLLM's
+  `model_prices_and_context_window.json`. It covers input, output, cache read, cache
+  write (5m/1h), reasoning, `above_200k` tiers and batch/flex.
+- **Capabilities:** `tools`, `json_schema`, `vision`, `reasoning`, `max_input_tokens`.
+- **New sovereignty fields:**
+  - `provider_hq_country`, `hosting_countries`, `jurisdiction` (`EEA` / `NO` / `US` / …)
+  - `us_cloud_act_exposure` (bool)
+  - `zdr`, `trains_on_data`
+  - `certifications` (ISO 27001, C5, SecNumCloud…)
+- **Initial sovereign supply** (OpenAI-compatible endpoints, so one adapter covers them):
+  Berget AI (SE), Mistral regional EU endpoints, Infercom, Regolo (IT), IONOS, STACKIT,
+  Scaleway, OVHcloud. Melious and EUrouter are listed as aggregators. There is a
+  Norway-hosted slot for when a partner exists (memo open question).
+- **Built by** `scripts/build_catalog.py`. It emits the SDK file and the gateway policy
+  defaults, and a CI drift check fails the build if they differ. Every event records
+  `price_catalog_version`.
+- An unknown model has cost `None` ("unmetered"), never 0.
+
+### 7.2 Sensitivity classification & data policy
 
 ```yaml
-version: 1
-baseline_model: openai/gpt-4o            # for counterfactual savings on "auto"
-default_group: balanced
-quality_to_group: { draft: cheap, balanced: balanced, critical: frontier }
-groups:
-  cheap:    [openai/gpt-4o-mini, google/gemini-2.5-flash, anthropic/claude-haiku-4-5]
-  balanced: [openai/gpt-4o, anthropic/claude-sonnet-4-5]
-  frontier: [anthropic/claude-opus-4-1, openai/gpt-5]
+sensitivity:
+  unclassified_default: confidential
+  pii_escalation:                    # detected category -> minimum level
+    health_data: restricted
+    national_id: restricted          # incl. NO fødselsnummer, SE personnummer, DK CPR
+    iban: confidential
+    email: internal
 data_policy:
-  restricted:   { allow_providers: [], }            # never routed; must pin explicitly
-  confidential: { require_zdr: true, regions: [eu, us] }
-fallback: { on: [rate_limit, server_error, timeout, context_length], max_attempts: 3 }
+  public:       { jurisdictions: [any] }
+  internal:     { jurisdictions: [EEA, US], require_zdr: false }
+  confidential: { jurisdictions: [EEA], require_zdr: true, us_cloud_act_exposure: false }
+  restricted:   { jurisdictions: [NO, EEA], providers: [berget, mistral-eu], require_zdr: true }
 ```
 
-`RoutePolicy.load()` in Python and `loadPolicy()` in the gateway both
-validate against one JSON Schema (`schemas/route-policy.v1.json`).
+- Add Nordic identifier detectors to `pii.py`: Norwegian fødselsnummer with mod-11
+  checksum, Swedish personnummer with Luhn, Danish CPR, and Finnish HETU. Checksums cut
+  the false positives that the README already admits to.
+- Documentation must state plainly that detection only *escalates*. A missed detection
+  falls back to the declared classification and `unclassified_default`, never to
+  "public". This is how the router stays safe with a regex engine.
 
-## 7. Phased delivery (milestone breakdown)
+### 7.3 Routing strategies & quality bar
 
-| Phase | Scope | Exit criteria |
-|---|---|---|
-| **P0 — Foundations** | Catalog schema + generator; price at served model; cached/reasoning token pricing; streaming usage; `price_catalog_version`; gateway parity CI check | Cost within ±2% of provider-reported cost on a recorded fixture set; `auto` calls no longer record `cost=None` |
-| **P1 — Multi-provider client** | `ShieldsRouter` (sync + async); OpenAI-shape normalisation for Anthropic + Gemini (text, tools, streaming); `vendor/model` IDs | Same test suite passes against all three providers via `respx` fixtures |
-| **P2 — Router + fallback** | Python `RouterStrategy` + Heuristic/Cost/Latency strategies; `ProviderPrefs`; capability + data-policy filters; fallback engine + circuit breaker; shared policy YAML + JSON Schema | Router overhead p50 < 1 ms; fallback matrix (§6.4) covered by tests; zero data-policy violations in property tests |
-| **P3 — Budgets & savings** | `Budget` + in-process / Redis stores; new event fields; Alembic migration; usage-summary savings; OTel extra | Demo shows budget downgrade, and a savings number appears in the registry |
-| **P4 — Learned routing (experimental)** | `LearnedStrategy` adapter (RouteLLM `mf`, optional extra); export of routed-call telemetry for offline training; offline eval harness | Offline eval report on a public benchmark: savings at a quality-retention target, published in docs |
+- A Python port of the gateway's `RouterStrategy` interface. Strategies: `Heuristic`
+  (existing), `Cheapest`, `Latency`, and a `Learned` adapter later.
+- **Quality bar per use case:**
+  - The policy can pin `min_group` (e.g. `frontier` for `legal-review`).
+  - Optionally, an `eval_set` id. A model is eligible for that use case only after it
+    passes the set at ≥ the configured parity (default 95%).
+- Precedence is unchanged from the gateway: explicit group > hints > policy default.
+  Data-policy constraints sit above all of them.
 
-## 8. Success metrics
+### 7.4 Eval harness (`prompt_shields.evals`)
 
-- **Accuracy.** Cost delta to the provider-reported cost is ≤ 2% at p95 across
-  catalog models (fixture suite plus a sample of live calls).
-- **Savings.** On the reference workload (`demo/`), `model="auto"` with the
-  default policy reaches ≥ 30% lower cost than the `baseline_model`, with
-  ≤ 2 points of quality loss on an LLM-judge eval. The target is to be confirmed
-  in P4.
-- **Reliability.** With one provider forced to 100% failure, ≥ 99% of calls
-  still succeed through fallback in the integration test.
-- **Overhead.** Added p50 latency is < 1 ms (rule-based) and there is no network
-  I/O on the hot path.
-- **Adoption.** Number of tenants with `route_mode=local` events, and the share
-  of SDK events with `cost_source=reported`.
+- **Inputs:** a golden set (customer-provided prompt/expected pairs, or prompts with a
+  rubric) and a list of candidate models.
+- **Scoring:** exact match, schema validity, or LLM-as-judge (pairwise against the
+  baseline model's answer). The judge model is itself policy-constrained, so restricted
+  data is never sent to a non-compliant judge.
+- **Output:** a parity score per (use case, model) with a confidence interval. The result
+  is written back into the policy as eligibility and is versioned. This is what turns
+  "same performance" from a claim into evidence (P4).
 
-## 9. Risks & mitigations
+### 7.5 Failover engine
+
+| Condition | Action |
+|---|---|
+| 429 | Respect `Retry-After` up to `max_wait`, then move to the next candidate **within the same constraint set** |
+| 5xx, timeout, connection error | Next candidate. A circuit breaker per provider handles EU capacity shortages (P5) |
+| Context length exceeded | Next candidate with a larger window that is still compliant |
+| 400 / 401 / 403 | Raise. No fallback. |
+| Provider content-filter refusal | Raise by default. Falling back to a laxer model is a policy-evasion path (P7). |
+| Stream already emitting tokens | Never retry |
+| No compliant candidate left | `PolicyViolation`. Fail closed. |
+
+### 7.6 AI bill teardown toolkit (`packages/teardown`, Phase 0)
+
+This is the concierge MVP from the memo, and later a self-serve product.
+
+- **Inputs, any of:**
+  - provider usage exports (OpenAI and Anthropic usage CSV/API)
+  - gateway logs
+  - SDK/registry events
+  - a JSONL of `{messages, model, usage, metadata}`
+- **Prompt-text handling:** prompt text is optional. Without it, the toolkit produces a
+  *cost-only* teardown: attribution, cache-hit potential from request hashes, and price
+  arbitrage on the same model.
+- **Runs on the customer's machine** (`ps-teardown run logs.jsonl --policy policy.yaml`),
+  so logs never leave their environment. This supports the CISO sale and the memo's
+  "anonymised logs" constraint.
+- **Pipeline:**
+  1. Normalise.
+  2. Classify sensitivity and complexity.
+  3. Apply the policy and produce a routing decision per call.
+  4. Optionally re-execute a stratified sample on the candidate models with the
+     customer's keys.
+  5. Score with the eval harness.
+  6. Price with the catalog.
+- **Output:** a report in HTML and JSON with these sections:
+  - baseline spend
+  - projected spend by strategy
+  - savings at parity ≥ 95%
+  - sensitivity mix (share of traffic that *must* stay sovereign)
+  - cache-hit potential
+  - top cost drivers by business unit and use case
+  - quality-parity table
+  - methodology appendix: catalog version, sample size, judge model
+- The memo's go criterion ("≥ 30% savings at ≥ 95% parity") is read straight off this report.
+
+### 7.7 Semantic cache (Phase 2)
+
+- Extend the gateway cache (`middlewares/cache`, simple mode today) with a `semantic`
+  mode: embeddings plus a similarity threshold.
+- **The key always includes** tenant, use case, served model and policy version.
+- Off by default for sensitivity ≥ `confidential`. Never caches content-filter
+  responses. The embedding model is policy-constrained too.
+- Cache hits are reported as savings with `cost_source="cache"`.
+
+### 7.8 Spend governance (Phase 2; folds in the memo's idea B)
+
+- **Budgets** per business unit, use case or team, by day, week or month. Modes:
+  `warn` / `downgrade` / `block`.
+  - The gateway enforces them org-wide with a shared store.
+  - The SDK enforces them per process, or through a Redis `BudgetStore`.
+- **Attribution.** The registry already holds `business_unit` / `use_case` / `owner`.
+  Add cost roll-ups and a FOCUS-compatible export so FinOps tools can ingest it. Follow
+  the Linux Foundation Tokenomics work for alignment.
+- **Anomaly alerts** on spend-rate deviations per use case (e.g. more than 3σ above a
+  7-day EWMA), via webhooks.
+- **Audit export.** Per-call routing evidence (jurisdiction, policy version) in a
+  shape that can feed the Purview/Defender integration.
+
+### 7.9 Anonymise-then-route (Phase 3, gated)
+
+This is the memo's biggest unlock: once a prompt is scrubbed, a cheaper external model
+becomes acceptable. The design is reversible pseudonymisation. Entities are replaced
+with tokens before the call, and the original values are restored in the response
+locally. **The gate:** it ships only after the detection engine reaches a measured
+recall target on a labelled Nordic and EU PII set. Until then, sensitive traffic is
+*routed* to a sovereign model and is *not rewritten*. That matches the README's honest
+framing of the current PII engine.
+
+### 7.10 Verified savings & baseline
+
+- **Baseline.** At onboarding, freeze the customer's model mix plus the catalog version
+  as `baseline_id`. The counterfactual cost of each call equals the call's actual token
+  usage priced at the baseline model for its use case.
+- Savings = Σ(counterfactual − actual), with cache hits and routed calls reported separately.
+- The reconciliation report compares our figures with the provider invoice. A gap of
+  more than 2% marks the period as `unreconciled`. This is what makes a share-of-savings
+  contract defensible.
+
+### 7.11 SDK developer experience
+
+```python
+from prompt_shields import ShieldsRouter, RouteHint
+
+client = ShieldsRouter(
+    providers={                                   # BYOK; keys never leave the process
+        "openai":     {"api_key": ...},
+        "anthropic":  {"api_key": ...},
+        "berget":     {"api_key": ..., "base_url": "https://api.berget.ai/v1"},
+        "mistral-eu": {"api_key": ...},
+    },
+    ps_api_key="ps-...",
+    business_unit="Claims", use_case="claim-summary",
+    data_classification="confidential",           # -> EEA-only, ZDR
+    policy="ps-route.yaml",
+)
+
+resp = client.chat.completions.create(model="auto", messages=[...],
+                                      route=RouteHint(quality="balanced"))
+resp.ps.route        # model, provider, jurisdiction, reason, policy_version
+resp.ps.cost         # breakdown, counterfactual, source
+resp.ps.attempts     # failover chain
+```
+
+- Responses always come back in the OpenAI chat-completions shape, with `raw` kept for
+  native access. `ShieldsRouter(mode="gateway")` delegates the decision to the gateway
+  through the existing `X-PS-*` headers.
+
+### 7.12 Telemetry additions (metadata only, per CONTRIBUTING)
+
+| Field | Purpose |
+|---|---|
+| `sensitivity_level`, `sensitivity_source` (`declared` / `pii_escalated` / `default`) | CISO evidence |
+| `served_provider`, `served_jurisdiction`, `policy_version` | Proof of where each call was served |
+| `route_group`, `route_reason`, `route_mode` (`gateway` / `local` / `none`) | Routing evidence |
+| `fallback_chain` (error class only) | Reliability |
+| `cost_breakdown`, `cost_source` (`reported` / `estimated` / `cache`), `price_catalog_version` | Accurate cost |
+| `counterfactual_cost`, `baseline_id` | Verified savings |
+| `budget_state` | Governance |
+
+These need nullable columns via Alembic `004_route.py`. Usage-summary APIs are extended
+with `savings_usd`, `sovereign_share` and `fallback_rate`.
+
+## 8. Phases, gates and the 6-week test
+
+| Phase | Weeks | Scope | Exit / gate |
+|---|---|---|---|
+| **P0 — Teardown MVP** | 0–3 | Fix served-model pricing; catalog v1 with cache, reasoning and sovereignty fields; streaming usage; Nordic ID detectors; policy schema v1 and golden vectors; teardown CLI (cost-only mode first, then replay + eval harness v0) | Two concierge teardowns delivered to pipeline accounts (memo: Storebrand, Tetra Tech, CluePoints, Svanemerket, SELENCIA) |
+| **Gate 1 (memo)** | 4–6 | — | **Go:** ≥3 of 10 prospects spend more than €5k/month; ≥2 teardowns show ≥30% savings at ≥95% parity; ≥1 paid pilot or LOI. **Kill:** buyers see cost as Microsoft's problem, or teardown savings are <15% → drop routing, keep P0 cost accuracy, move straight to P2 governance (idea B). |
+| **P1 — Sensitivity-aware routing** | 6–12 | Gateway router gets a sensitivity input and the constraint stage; OpenAI-compatible sovereign provider adapter; failover engine + circuit breakers; SDK `ShieldsRouter` local mode; counterfactual cost + baseline; telemetry + migration | A pilot customer runs in production behind the gateway; zero jurisdiction violations in property tests and in the pilot; invoice reconciliation within ±2% |
+| **P2 — Governance & cache** | 10–16 | Budgets (gateway shared store, SDK Redis store); anomaly alerts; FOCUS export; semantic cache mode; savings dashboards in the registry API | The pilot's FinOps owner uses budgets and alerts; cache savings reported |
+| **P3 — Learned routing & anonymise-then-route** | 16+ | RouteLLM-style learned strategy trained on pilot telemetry plus the eval harness; reversible pseudonymisation behind a recall gate | The learned router beats the heuristic on the eval set; the recall target is met before anonymisation is enabled for any tenant |
+
+## 9. Success metrics
+
+- **Teardown:** turnaround of 1 working day or less; ≥30% savings at ≥95% parity on ≥2 of
+  the first 3 teardowns (the memo's go criterion).
+- **Safety:** zero calls served outside the allowed jurisdiction. This is measured
+  continuously from `served_jurisdiction` against `sensitivity_level`.
+- **Accuracy:** cost within ±2% of the invoice for the reconciled period.
+- **Reliability:** ≥99% success with one provider forced down (failover test).
+- **Overhead:** under 10 ms p50 for classify + route at the gateway, with no network I/O on the hot path.
+- **Commercial:** paid pilots or LOIs; share of revenue from savings-share contracts.
+
+## 10. Risks
 
 | Risk | Mitigation |
 |---|---|
-| **Design reversal.** "The SDK never picks a model" is stated in `types.py`, `PS_README.md` and the SDK guide | Local routing is opt-in (`ShieldsRouter`); existing clients are untouched; docs updated in the same PR as P1; gateway mode retained |
-| Price data goes stale | Versioned catalog, a generator from one source, an optional signed refresh, and `price_catalog_version` on every event |
-| Response normalisation across providers is a large surface | Scope P1 to text + tools + streaming; keep `raw` passthrough; only add multimodal when it is needed |
-| Fallback weakens governance (laxer model, other region) | Data-policy filter runs **before** strategy; content-filter fallback is off by default; `fallback_chain` + `served_region` recorded |
-| Switching providers breaks prompt caching | Sticky preference: keep the last-served provider for the same `session_id` when its cost is within ε |
-| Budgets are only per-process by default | Document it plainly; ship a Redis `BudgetStore`; recommend the gateway for org-wide hard caps |
-| New dependencies bloat the base install | Everything ships behind an `[optimizer]` extra (`tiktoken`, `pyyaml`), with `[optimizer-redis]` and `[optimizer-learned]` on top; the base install stays `httpx`-only |
-| Licence mixing | The policy schema and catalog generator live in Apache-2.0 code; the gateway reads the generated JSON and no TS code is copied across (see CONTRIBUTING) |
+| Commoditisation (OpenRouter, hyperscalers, Microsoft Foundry routing) | Compete on sensitivity + evidence + attribution, not on breadth or price (P2) |
+| EU provider capacity shortages | Mandatory multi-provider failover within the constraint set; circuit breakers; at least two sovereign providers per restricted policy |
+| Quality liability on regulated tasks | Per-use-case eval eligibility; conservative `min_group`; no fallback after a content-filter refusal |
+| A regex PII engine misses sensitive data | Escalate-only design; `unclassified_default: confidential`; checksummed Nordic IDs; no prompt rewriting until the recall gate is met |
+| Savings claims disputed | Frozen baseline, versioned catalog, invoice reconciliation, methodology appendix |
+| Focus dilution versus the ASPM roadmap | Phase 0 is mostly tooling (catalog, cost fix, teardown), which is useful even on the kill path; online routing is built only after Gate 1 |
+| Breaking the "the SDK never picks a model" contract | Local routing is opt-in through `ShieldsRouter`; existing clients unchanged; docs updated in the P1 PR |
+| Secondary-source market data | Validate before investor or external use (memo risk list) |
 
-## 10. Open questions
+## 11. Open questions
 
-1. Should `ShieldsRouter` be a new class, or should `ShieldsClient(vendor="auto", providers=...)` gain the capability? The PRD assumes a new class for zero-risk adoption.
-2. Should a hosted catalog refresh endpoint be part of Prompt Shields Cloud (paid) or a public static file (free)? The README's free/paid boundary suggests free.
-3. Is Gemini in P1, or is Mistral or Bedrock more requested by design partners?
-4. What is the baseline for savings on `model="auto"`: a policy-level `baseline_model`, or the most expensive candidate in the chosen group?
-5. Should the Atlas sink (`AtlasTelemetrySender`) receive the new fields at the same time?
+1. *(Memo)* Is this a new SKU, or the reason to buy Prompt Shields at all? This decides
+   whether the teardown is free, which would make it a lead magnet.
+2. *(Memo)* Which two pipeline accounts will share logs within 3 weeks? Will they accept
+   running the CLI locally?
+3. *(Memo)* Partner with Melious and EUrouter as supply, or only integrate the
+   underlying providers directly?
+4. *(Memo)* Is there a Norway-hosted provider or Nscale capacity for a `NO` jurisdiction
+   in the restricted tier?
+5. Does a US-headquartered provider's EU region count as `EEA` for `confidential`?
+   Proposal: allowed only when `us_cloud_act_exposure` is accepted by the customer policy.
+6. Savings-share baseline: the customer's actual historical mix, or a list-price
+   "naive" baseline? Proposal: the historical mix, frozen at onboarding.
 
-## Appendix A — Sources
+## Appendix A — Research notes
 
-- OpenRouter: provider routing, model fallbacks, `:floor`/`:nitro`, auto router, usage accounting — https://openrouter.ai/docs/features/provider-routing, https://openrouter.ai/docs/guides/routing/model-fallbacks, https://openrouter.ai/docs/guides/routing/routers/auto-router, https://openrouter.ai/docs/cookbook/administration/usage-accounting
-- LiteLLM routing & budgets — https://docs.litellm.ai/docs/routing, https://docs.litellm.ai/docs/proxy/users; price map — https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
-- Portkey config object — https://portkey.ai/docs/api-reference/config-object
-- RouteLLM — https://github.com/lm-sys/RouteLLM, https://arxiv.org/abs/2406.18665
-- NotDiamond — https://docs.notdiamond.ai/docs/key-concepts
-- Prompt caching — https://docs.claude.com/en/docs/build-with-claude/prompt-caching, https://developers.openai.com/api/docs/guides/prompt-caching
-- Vercel AI Gateway provider options — https://vercel.com/docs/ai-gateway/models-and-providers/provider-options
-- Cloudflare AI Gateway — https://developers.cloudflare.com/ai-gateway/features/
-- OTel GenAI semantic conventions — https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans
+- **OpenRouter:**
+  - `models[]` ordered fallback
+  - `provider { order, only, ignore, sort, max_price, zdr, data_collection, quantizations }`
+  - exact `usage.cost` on every response
+  - `:floor` / `:nitro` variants
+  - Auto Router with a candidate allow-list
+  - sticky provider routing to keep caches warm
 
-Some vendor details were checked only against secondary sources: OpenRouter fee
-percentages and the auto-router backend, RouteLLM per-benchmark splits, and
-Portkey conditional-routing syntax. Re-check them before they are quoted externally.
+  We reuse this vocabulary in `ProviderPrefs`.
+- **LiteLLM:** price-map schema (adopted); separate fallback classes (context window,
+  content policy); budgets per key, user and team. The 2026 breach supports the memo's
+  "trusted, hardened gateway" pitch.
+- **Portkey** (our gateway's upstream): `strategy.mode` fallback / loadbalance /
+  conditional; simple and semantic cache.
+- **RouteLLM:** strong-versus-weak learned router with a calibrated threshold. This is
+  the P3 starting point.
+- **Melious** (memo): 60+ open-weight models across 11 EU providers, routing variants
+  by name suffix, no visible enterprise governance layer. It is *supply*, not a template.
+
+Sources: see the guiding memo's source list, plus
+https://openrouter.ai/docs/features/provider-routing ·
+https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json ·
+https://portkey.ai/docs/api-reference/config-object ·
+https://github.com/lm-sys/RouteLLM ·
+https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans

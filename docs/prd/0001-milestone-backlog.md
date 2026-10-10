@@ -1,65 +1,74 @@
-# Milestone backlog — `SDK Model & Cost Optimizer`
+# Backlog — Prompt Shields Route (PRD 0001 v2)
 
-Ready-to-file issues for [PRD 0001](0001-model-cost-optimizer.md). Each issue
-title is prefixed with its phase. Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
+These are ready-to-file issues for [PRD 0001](0001-model-cost-optimizer.md). Each group
+below matches a GitHub milestone:
 
-Milestone description to paste into GitHub:
+| Milestone | Due | Link |
+|---|---|---|
+| P0 — Teardown MVP | 2026-10-31 | [milestone/1](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/1) |
+| Gate 1 — Market test decision | 2026-11-21 | [milestone/2](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/2) |
+| P1 — Sensitivity-aware routing | 2027-01-02 | [milestone/3](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/3) |
+| P2 — Spend governance & semantic cache | 2027-01-30 | [milestone/4](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/4) |
+| P3 — Learned routing & anonymise-then-route | — | [milestone/5](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/5) |
 
-> OpenRouter-style local routing in the Python SDK. One client calls several
-> providers with the customer's own keys, routes on quality, price, latency and
-> data policy, falls back on failure, enforces budgets, and reports exact cost
-> and provable savings to the registry. See docs/prd/0001-model-cost-optimizer.md.
+Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
 
-## P0 — Foundations
-
-| # | Title | Size | Acceptance criteria |
-|---|---|---|---|
-| 1 | `[P0] Price events at served_model, not requested_model` | S | `_build_event` (sync + async) prices at `served_model`; `model="auto"` no longer yields `cost=None` when the served model is known; regression test. |
-| 2 | `[P0] Model & pricing catalog (LiteLLM-compatible schema)` | M | `prompt_shields/catalog.json` + `catalog.py` loader. It has cache-read, cache-write, reasoning, `above_200k`, batch and capability columns and `max_input_tokens`. `estimate_cost()` stays backward compatible. Unknown model → `None`. |
-| 3 | `[P0] Catalog generator + gateway parity check` | M | `scripts/build_catalog.py` emits the SDK JSON and the gateway `defaultPolicy` pricing; a CI step fails on drift. `FORK_NOTICE.md` is updated if an upstream file is touched. |
-| 4 | `[P0] Cached and reasoning token accounting` | S | OpenAI `cached_tokens` and `reasoning_tokens`, Anthropic `cache_read`/`cache_creation`, and Gemini `cachedContentTokenCount` are parsed into a `CostBreakdown`. Fixtures prove ≤2% delta. |
-| 5 | `[P0] Streaming usage capture` | M | OpenAI streams inject `include_usage`; Anthropic `message_delta` usage is accumulated; the event is emitted on stream close; aborted streams are emitted with `cost_source="estimated"`. |
-| 6 | `[P0] price_catalog_version + cost_source on events` | S | Both fields appear on every SDK event; the collector accepts them (nullable). |
-
-## P1 — Multi-provider client
+## P0 — Teardown MVP (weeks 0–3)
 
 | # | Title | Size | Acceptance criteria |
 |---|---|---|---|
-| 7 | `[P1] ShieldsRouter / AsyncShieldsRouter skeleton` | M | `providers={...}` BYOK config, `vendor/model` IDs, lazy upstream construction, and the same discovery metadata as `ShieldsClient`. Existing clients are unchanged. |
-| 8 | `[P1] OpenAI-shape normalisation: Anthropic` | L | Text, system prompt, tools/tool_use and streaming map to and from the chat-completions shape. `resp.raw` keeps the native object. |
-| 9 | `[P1] Google Gemini provider adapter` | L | A `GoogleAdapter` extracts usage and tool calls, normalises responses and is added to the catalog. |
-| 10 | `[P1] resp.ps metadata (route, cost, attempts)` | S | A typed `PSResult` is attached to every response from the router client. |
+| 1 | Price events at `served_model`, not `requested_model` | S | Sync and async `_build_event` price at the served model. `model="auto"` no longer yields `cost=None`. Regression test. |
+| 2 | Catalog v1: LiteLLM-compatible prices + sovereignty fields | M | `catalog.json` + loader covering cache read/write, reasoning, `above_200k`, batch and capabilities. Adds `jurisdiction`, `hosting_countries`, `provider_hq_country`, `us_cloud_act_exposure`, `zdr` and `certifications`. Seeded with current OpenAI/Anthropic/Google models and the EU sovereign supply (Berget, Mistral EU, Infercom, Regolo, IONOS, STACKIT, Scaleway, OVHcloud). `estimate_cost()` stays backward compatible. |
+| 3 | Catalog generator + gateway drift check | M | `scripts/build_catalog.py` emits the SDK JSON and the gateway policy defaults. CI fails on drift. `FORK_NOTICE.md` is updated if an upstream file is touched. |
+| 4 | Cached, reasoning and streaming usage accounting | M | Parses OpenAI `cached_tokens`/`reasoning_tokens`, Anthropic `cache_*` and Gemini `cachedContentTokenCount`. Adds `include_usage` on OpenAI streams and accumulates Anthropic `message_delta`. Sets `cost_source`. Fixture deltas are ≤2%. |
+| 5 | Nordic national-ID detectors | S | Norwegian fødselsnummer (mod-11), Swedish personnummer (Luhn), Danish CPR and Finnish HETU, each checksum-validated. A new `national_id` category. Tests include negatives. |
+| 6 | `route-policy.v1` JSON Schema + golden decision vectors | M | Covers sensitivity levels, PII escalation, data policy, groups, quality bar and fallback. Shared vectors (`schemas/route-policy/vectors/*.json`) define the expected decisions both implementations must pass. |
+| 7 | `ps-teardown` CLI — cost-only mode | M | Ingests OpenAI/Anthropic usage exports, SDK/registry events, gateway logs and generic JSONL. Reports baseline spend, attribution by BU/use case, same-model price arbitrage and cache-hit potential from request hashes. Outputs HTML + JSON. Runs fully locally. |
+| 8 | `ps-teardown` — policy replay + sensitivity mix | M | Applies the policy to each logged call (Python reference router). Reports the share of traffic that must stay sovereign and the projected spend per strategy. |
+| 9 | Eval harness v0 + sample re-execution | L | Builds a stratified sample, re-runs it on candidate models with customer keys, and scores by exact match, schema validity or LLM-as-judge (the judge is itself policy-constrained). Parity per (use case, model) with a CI. Feeds savings-at-parity into the report. |
+| 10 | Teardown methodology appendix + report template | S | Records catalog version, sample size, judge model, baseline definition and known limits. Produces a pitch-ready report for the memo's concierge offer. |
 
-## P2 — Router, fallback, shared policy
-
-| # | Title | Size | Acceptance criteria |
-|---|---|---|---|
-| 11 | `[P2] Route policy JSON Schema + YAML loader (SDK & gateway)` | M | `schemas/route-policy.v1.json`; `RoutePolicy.load()` in Python and `loadPolicy()` in the gateway validate against it. The default policy is generated from the catalog. |
-| 12 | `[P2] Python RouterStrategy + Heuristic/Cost/Latency strategies` | M | A port of gateway semantics with the same precedence and engagement rules. Golden tests are shared with `gateway/.../router.test.ts`. p50 < 1 ms. |
-| 13 | `[P2] ProviderPrefs (sort, only/ignore, max_price, require)` | M | OpenRouter-equivalent provider preferences, applied as filters before the strategy runs. |
-| 14 | `[P2] Data-policy filter (classification → providers/regions/ZDR)` | M | `restricted` data is never auto-routed. Property tests show zero violations. `served_provider`/`served_region` are recorded. |
-| 15 | `[P2] Fallback & retry engine + circuit breaker` | L | Implements the §6.4 matrix: no retry after a stream has started, content-filter fallback off by default, capability check before a fallback target is chosen, and `fallback_chain` on the event. |
-| 16 | `[P2] Prompt-cache-aware stickiness` | S | Reuse the last provider for a `session_id` when its cost is within ε. |
-
-## P3 — Budgets, savings, registry
+## Gate 1 — Market test decision (weeks 4–6)
 
 | # | Title | Size | Acceptance criteria |
 |---|---|---|---|
-| 17 | `[P3] Budget API + in-process store` | M | Supports the `raise` / `downgrade` / `warn` modes, a pre-call worst-case check and post-call reconciliation. The per-process limitation is documented. |
-| 18 | `[P3] Redis BudgetStore (optional extra)` | S | `[optimizer-redis]` extra; atomic increments; TTL per period. |
-| 19 | `[P3] Collector + DB: routing/cost fields (Alembic 004)` | M | Nullable columns for the §6.7 fields; ingest validation; tests. CONTRIBUTING privacy note in the PR. |
-| 20 | `[P3] counterfactual_cost + usage-summary savings` | M | `counterfactual_cost` on routed events; `GET /assets/{id}/usage-summary` returns `savings_usd`, `fallback_rate` and `cost_by_model`; OpenAPI + Mintlify docs updated. |
-| 21 | `[P3] OpenTelemetry GenAI spans (optional extra)` | S | `gen_ai.*` attributes under a pinned semconv version, plus `prompt_shields.route.*` and `prompt_shields.cost.*`. |
-| 22 | `[P3] Docs: SDK guide, README limits, demo` | M | Rewrite SDK Guide §6 and `docs/sdks/python.mdx`; add a limits section to the README ("What this does not do"); add a `demo/demo_router.py` that shows fallback, a budget downgrade and savings. |
+| 11 | Run concierge teardowns for 2+ pipeline accounts | — | Reports delivered. Savings % at parity recorded per account. |
+| 12 | Go/kill decision record | S | A decision document against the memo criteria (≥3/10 spend >€5k/mo; ≥2 teardowns ≥30% at ≥95% parity; ≥1 pilot or LOI). On kill: re-plan P1 out of scope and pull P2 forward. |
 
-## P4 — Learned routing (experimental)
+## P1 — Sensitivity-aware routing (weeks 6–12, only after GO)
 
 | # | Title | Size | Acceptance criteria |
 |---|---|---|---|
-| 23 | `[P4] LearnedStrategy adapter (RouteLLM mf, optional extra)` | M | Behind `[optimizer-learned]`; threshold calibrated to "% strong"; falls back to the heuristic on error. |
-| 24 | `[P4] Routed-call export for offline training` | S | Exports metadata-only training rows from the registry (no prompt text unless the tenant opted into `send_prompt_text`). |
-| 25 | `[P4] Offline eval harness + published savings report` | M | Public benchmark plus an LLM-judge score; reports the savings vs. quality curve; the results confirm or revise the PRD §8 target. |
+| 13 | Gateway: sensitivity classification stage | M | Sensitivity = max(declared `X-PS-Data-Classification`, PII-escalated level), escalate-only. `unclassified_default` is applied. Emits `sensitivity_level` and `sensitivity_source`. |
+| 14 | Gateway: fail-closed jurisdiction constraint stage | M | Filters candidates by the data policy before any strategy runs. No compliant candidate → `PolicyViolation` (HTTP 451/403 shape TBD). Passes the golden vectors. Property tests show zero violations. |
+| 15 | OpenAI-compatible sovereign provider adapter | M | One adapter, configured per provider (base URL, auth, region), for gateway and SDK. Records `served_provider` and `served_jurisdiction`. |
+| 16 | Failover engine + per-provider circuit breaker | L | Implements the PRD §7.5 matrix. Fallback stays within the constraint set. No retry after a stream has started. No fallback on a content-filter refusal. Records `fallback_chain`. |
+| 17 | SDK `ShieldsRouter` (sync + async), local mode | L | BYOK multi-provider. OpenAI-shape responses with `raw`. `resp.ps` exposes route, cost and attempts. Python router passes the golden vectors. `mode="gateway"` delegates. Existing clients unchanged. |
+| 18 | Per-use-case quality bar | M | `min_group` and eval-set eligibility in the policy. The router excludes models that have not passed parity. |
+| 19 | Frozen baseline + counterfactual cost | M | `baseline_id` frozen at onboarding. `counterfactual_cost` on every routed event. Invoice reconciliation report flags a gap above ±2%. |
+| 20 | Collector/DB: route + cost fields (Alembic 004) | M | Nullable columns for the PRD §7.12 fields. Ingest validation. The PR includes the CONTRIBUTING privacy statement. |
+| 21 | Registry API: savings + sovereign share | M | `usage-summary` returns `savings_usd`, `sovereign_share` and `fallback_rate`. OpenAPI + Mintlify docs updated. |
+| 22 | Docs: routing guide, README limits, demo | M | SDK Guide §6 rewrite, gateway PS_README, and a README "What this does not do" update. `demo/demo_route.py` shows sensitivity routing, failover and savings. |
+
+## P2 — Spend governance & semantic cache (weeks 10–16)
+
+| # | Title | Size | Acceptance criteria |
+|---|---|---|---|
+| 23 | Budgets: gateway shared store | M | Per BU, use case or team, by day, week or month. Modes `warn`, `downgrade` (within constraints) and `block`. Emits `budget_state`. |
+| 24 | Budgets: SDK in-process + Redis `BudgetStore` | M | Same semantics as the gateway. The per-process limitation is documented. Ships as an `[optimizer-redis]` extra. |
+| 25 | Spend anomaly alerts | M | Per-use-case EWMA/σ detector. Webhook delivery. Thresholds configurable. |
+| 26 | FOCUS-compatible cost export | S | CSV/Parquet export of cost by BU, use case, model and provider, aligned with the FinOps FOCUS spec. |
+| 27 | Purview/Defender audit export | M | Per-call routing evidence (jurisdiction, policy version, sensitivity) in an ingestible format. |
+| 28 | Gateway semantic cache mode | L | Embeddings + threshold. The key includes tenant, use case, model and policy version. Off for sensitivity ≥ `confidential`. Never caches refusals. Records `cost_source="cache"`. |
+
+## P3 — Learned routing & anonymise-then-route (weeks 16+)
+
+| # | Title | Size | Acceptance criteria |
+|---|---|---|---|
+| 29 | Learned routing strategy (RouteLLM-style) | L | Trained on pilot telemetry + eval results. Behind the `RouterStrategy` interface in both implementations. Must beat the heuristic on the eval set. Falls back to the heuristic on error. |
+| 30 | Labelled Nordic/EU PII benchmark + recall gate | M | A labelled dataset and a recall/precision report for `pii.py`. The gate threshold is agreed with security. |
+| 31 | Reversible pseudonymisation (anonymise-then-route) | L | Entity → token before the call, restored locally after. Enabled per tenant only once #30 passes. Off by default. |
 
 ## Suggested labels
 
-`area:sdk`, `area:gateway`, `area:collector`, `optimizer`, `phase:P0` … `phase:P4`, `size:S|M|L`.
+`area:sdk`, `area:gateway`, `area:collector`, `area:teardown`, `route`, `size:S|M|L`.
