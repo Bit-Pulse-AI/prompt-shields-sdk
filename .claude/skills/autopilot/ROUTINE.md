@@ -23,26 +23,37 @@ In claude.ai/code, use an environment that:
   Docker — without Docker the integration suite is skipped and DB-touching PRs
   will not be merged.
 
-## 3. Create the Routine
+## 3. The Routine (dispatcher)
 
-Create a Routine that **starts a fresh session on each firing**, on this
-repository's environment, hourly:
+A Routine that starts a fresh session on each firing gets no repository
+attached (and cannot attach one), so the schedule is set up as a
+**dispatcher**:
 
-- Name: `prompt-shields autopilot`
-- Schedule: `0 * * * *`
-- Prompt:
+- Routine **prompt-shields autopilot (hourly dispatcher)** fires hourly into a
+  long-lived Claude session that has the `create_session` tool.
+- Each firing, that session archives the previous finished tick and calls
+  `create_session` with this repository as `source_url`, `model:
+  claude-sonnet-5-5`, tag `autopilot`, and the **tick prompt**.
+- The tick prompt is stored inside the Routine's own prompt, between
+  `=== TICK PROMPT START ===` and `=== TICK PROMPT END ===`.
 
-  ```
-  Run one autopilot tick for Prompt-Shields/prompt-shields-sdk.
-  Invoke the `autopilot` skill (.claude/skills/autopilot/SKILL.md) and follow
-  it exactly, from phase 0 (orient and lock) through phase 7 (retro). Stop
-  when the tick's budget is spent or nothing is left to do.
-  ```
+## 4. What to edit where
 
-A Claude session can create this for you (ask it to "create the hourly
-autopilot Routine as described in ROUTINE.md").
+| You want to change | Edit |
+|---|---|
+| How often it runs | The Routine's schedule in claude.ai → Routines |
+| Which model ticks use | `model:` line in the Routine prompt |
+| What each tick is told up front | Text between the TICK PROMPT markers in the Routine prompt |
+| What a tick actually does (phases, rules) | `SKILL.md` and `references/*.md` in this directory |
+| Limits, labels, risk paths, release policy | `config.md` |
+| Lessons | `LEARNINGS.md` |
 
-## 4. Operating it
+Skill files are read fresh from GitHub on every tick, so a pushed or merged
+edit takes effect on the next tick. Until PR #49 merges, ticks read them from
+the `claude/vigilant-meitner-fehfx1` branch; after it merges, from `main`.
+Autopilot never merges changes to this directory itself.
+
+## 5. Operating it
 
 - **Watch:** the "Autopilot journal" issue has one entry per tick.
 - **Pause:** add `autopilot:pause` to the journal issue. Remove it to resume.
