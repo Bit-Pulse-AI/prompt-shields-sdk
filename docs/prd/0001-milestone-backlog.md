@@ -9,7 +9,7 @@ below matches a GitHub milestone:
 | Gate 1 — Market test decision | 2026-11-21 | [milestone/2](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/2) |
 | P1 — Sensitivity-aware routing | 2027-01-02 | [milestone/3](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/3) |
 | P2 — Spend governance & semantic cache | 2027-01-30 | [milestone/4](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/4) |
-| P3 — Learned routing & anonymise-then-route | — | [milestone/5](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/5) |
+| P3 — Autonomous learning & anonymise-then-route | — | [milestone/5](https://github.com/Prompt-Shields/prompt-shields-sdk/milestone/5) |
 
 Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
 
@@ -27,6 +27,7 @@ Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
 | 8 | `ps-teardown` — policy replay + sensitivity mix | M | Applies the policy to each logged call (Python reference router). Reports the share of traffic that must stay sovereign and the projected spend per strategy. |
 | 9 | Eval harness v0 + sample re-execution | L | Builds a stratified sample, re-runs it on candidate models with customer keys, and scores by exact match, schema validity or LLM-as-judge (the judge is itself policy-constrained). Parity per (use case, model) with a CI. Feeds savings-at-parity into the report. |
 | 10 | Teardown methodology appendix + report template | S | Records catalog version, sample size, judge model, baseline definition and known limits. Produces a pitch-ready report for the memo's concierge offer. |
+| 32 | Teardown exports learning tuples (warm start) | S | Replay emits `(prompt features, model, quality score, cost)` tuples in the §7.13 schema, so a pilot's learner starts warm. Features are computed locally, and the export contains no prompt text. |
 
 ## Gate 1 — Market test decision (weeks 4–6)
 
@@ -49,6 +50,10 @@ Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
 | 20 | Collector/DB: route + cost fields (Alembic 004) | M | Nullable columns for the PRD §7.12 fields. Ingest validation. The PR includes the CONTRIBUTING privacy statement. |
 | 21 | Registry API: savings + sovereign share | M | `usage-summary` returns `savings_usd`, `sovereign_share` and `fallback_rate`. OpenAPI + Mintlify docs updated. |
 | 22 | Docs: routing guide, README limits, demo | M | SDK Guide §6 rewrite, gateway PS_README, and a README "What this does not do" update. `demo/demo_route.py` shows sensitivity routing, failover and savings. |
+| 33 | `call_id` + feedback API | M | Every routed call gets a `call_id`. SDK `client.feedback(call_id, score, reason=None)` and gateway `POST /v1/feedback` are rate-limited per user. Feedback is stored as metadata only. |
+| 34 | Implicit outcome signal capture | M | Records fallback, schema/tool-call parse failure, refusal, `max_tokens` truncation, and same-session regenerate/retry detection as `outcome_signals` classes on the event. |
+| 35 | Local prompt feature extraction | M | A local embedding plus complexity features (tokens, code, schema, language, use case), computed in the gateway or SDK process and kept there. Adds under 10 ms p50. A test proves nothing beyond the §7.12 metadata reaches the collector. |
+| 36 | Shadow-eval sampler | M | Samples a configurable share of calls (default 1–2%, capped at 2% of routed spend) and runs each on one alternative **compliant** model. A policy-constrained judge scores the pair. The user only sees the primary answer. Shadow cost is reported separately. |
 
 ## P2 — Spend governance & semantic cache (weeks 10–16)
 
@@ -60,12 +65,14 @@ Sizes: S ≤ 2 days, M ≤ 1 week, L ≤ 2 weeks.
 | 26 | FOCUS-compatible cost export | S | CSV/Parquet export of cost by BU, use case, model and provider, aligned with the FinOps FOCUS spec. |
 | 27 | Purview/Defender audit export | M | Per-call routing evidence (jurisdiction, policy version, sensitivity) in an ingestible format. |
 | 28 | Gateway semantic cache mode | L | Embeddings + threshold. The key includes tenant, use case, model and policy version. Off for sensitivity ≥ `confidential`. Never caches refusals. Records `cost_source="cache"`. |
+| 37 | Contextual-bandit learner — `recommend` mode | L | Per (tenant, use case) Thompson sampling over the policy-safe set, with reward = quality − λ·cost − μ·latency. Off-policy evaluation over logged traffic gives the projected savings and quality of each recommended policy change. Runs in shadow and never routes live traffic. |
+| 38 | Learner snapshots + recommendation review | M | Versioned learner state (`learner_version`) in the gateway or SDK store. The registry API lists recommendations with projections, and a human accepts or rejects each one. Realised vs. projected savings are tracked after acceptance. |
 
-## P3 — Learned routing & anonymise-then-route (weeks 16+)
+## P3 — Autonomous learning & anonymise-then-route (weeks 16+)
 
 | # | Title | Size | Acceptance criteria |
 |---|---|---|---|
-| 29 | Learned routing strategy (RouteLLM-style) | L | Trained on pilot telemetry + eval results. Behind the `RouterStrategy` interface in both implementations. Must beat the heuristic on the eval set. Falls back to the heuristic on error. |
+| 29 | Learner `auto` mode: exploration budget, auto-rollback, periodic retrain | L | The learner routes live, but only inside the policy-safe set. `explore_rate` defaults to 5%, and is 0 for `restricted` and `min_group: frontier` use cases. It auto-rolls back to the last good snapshot when parity or implicit-failure thresholds are breached. Drift or poisoning detection freezes learning. A periodic RouteLLM-style retrain provides the cold-start prior. Enabled per use case only after `recommend` mode has proven accurate. |
 | 30 | Labelled Nordic/EU PII benchmark + recall gate | M | A labelled dataset and a recall/precision report for `pii.py`. The gate threshold is agreed with security. |
 | 31 | Reversible pseudonymisation (anonymise-then-route) | L | Entity → token before the call, restored locally after. Enabled per tenant only once #30 passes. Off by default. |
 

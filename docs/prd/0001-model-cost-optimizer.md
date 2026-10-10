@@ -13,7 +13,7 @@
 
 Prompt Shields already sits in the request path through the SDK and the gateway, and
 already knows *what kind of data* each call carries. This PRD turns that position into
-a **cost-optimisation layer**. It covers four capabilities:
+a **cost-optimisation layer**. It covers five capabilities:
 
 - **Sensitivity-aware routing.** Regulated or PII-heavy calls go to a sovereign EU/Nordic
   model. Routine calls go to the cheapest model that passes the customer's quality bar.
@@ -21,6 +21,9 @@ a **cost-optimisation layer**. It covers four capabilities:
 - **Semantic caching.**
 - **Per-team spend governance.**
 - **Verified savings reporting.**
+- **A self-learning loop.** The router learns from each tenant's own traffic outcomes
+  which compliant model solves each kind of request most cheaply. It learns inside
+  the customer's environment and stays within the policy's guardrails (§7.13).
 
 It is built as a **module of the existing product, not a pivot**. Security stays the
 moat. Savings open a second budget, so the buyer becomes **CISO + CFO** instead of the CISO alone.
@@ -44,6 +47,7 @@ These are product constraints. Every design decision below traces to one of them
 | P5 | **Capacity is not our game.** EU providers run short of capacity. | Multi-provider failover is mandatory, not optional. The catalog treats Berget, Infercom, Mistral EU, Regolo, IONOS, STACKIT, Melious and EUrouter as **supply**. |
 | P6 | **Test before building.** | Phase 0 serves the teardown offer. Online routing is gated on the memo's go/kill criteria (§8). |
 | P7 | **Conservative on quality.** A cheaper model that fails on a regulated task is a liability. | Defaults favour quality. Downgrades require a per-customer eval pass. A content-filter refusal never triggers a fallback to a laxer model. |
+| P8 | **Learn from the traffic, keep the data home.** Routing should get cheaper and better on its own. | The learner runs per tenant inside the gateway or SDK. Only decision and outcome metadata leave. It can re-rank only models the policy already allows (§7.13). |
 
 ## 3. Context
 
@@ -153,9 +157,10 @@ MIT/Apache boundary (see CONTRIBUTING). Only data files are shared.
 ### 6.2 Request flow
 
 ```
-Intercept -> Classify -> Constrain -> Route -> Cache -> Call (+failover) -> Record
-             sensitivity  jurisdiction  cheapest     tenant-   provider        cost, counterfactual,
-             + complexity allow-list    capable      scoped    failover        served jurisdiction
+Intercept -> Classify -> Constrain -> Route -> Cache -> Call (+failover) -> Record -> Learn
+             sensitivity  jurisdiction  learner      tenant-   provider        cost,       outcome
+             + complexity allow-list    re-ranks     scoped    failover        jurisdiction signals ->
+             + features                 safe set                               learner_ver  bandit update
 ```
 
 1. **Intercept.** Through the SDK, the gateway, or (offline) a log file.
@@ -175,7 +180,8 @@ Intercept -> Classify -> Constrain -> Route -> Cache -> Call (+failover) -> Reco
    `confidential`. Flagged responses are never cached.
 6. **Call + failover.** Fall back within the same constraint set only (§7.5).
 7. **Record.** Telemetry carries the served model, provider and jurisdiction, the cost
-   breakdown, the counterfactual cost and the policy version.
+   breakdown, the counterfactual cost, the policy version and the learner version.
+8. **Learn.** Outcome signals update that tenant's learner in place (§7.13).
 
 ## 7. Components
 
@@ -226,7 +232,7 @@ data_policy:
 ### 7.3 Routing strategies & quality bar
 
 - A Python port of the gateway's `RouterStrategy` interface. Strategies: `Heuristic`
-  (existing), `Cheapest`, `Latency`, and a `Learned` adapter later.
+  (existing), `Cheapest`, `Latency`, and `Learned` (the self-learning loop, §7.13).
 - **Quality bar per use case:**
   - The policy can pin `min_group` (e.g. `frontier` for `legal-review`).
   - Optionally, an `eval_set` id. A model is eligible for that use case only after it
@@ -374,9 +380,79 @@ resp.ps.attempts     # failover chain
 | `cost_breakdown`, `cost_source` (`reported` / `estimated` / `cache`), `price_catalog_version` | Accurate cost |
 | `counterfactual_cost`, `baseline_id` | Verified savings |
 | `budget_state` | Governance |
+| `call_id`, `learner_version`, `explored` (bool), `outcome_signals` (classes only), `feedback_score`, `shadow_eval_score` | Self-learning loop (§7.13) |
 
 These need nullable columns via Alembic `004_route.py`. Usage-summary APIs are extended
 with `savings_usd`, `sovereign_share` and `fallback_rate`.
+
+### 7.13 Self-learning routing loop
+
+The router improves continuously from the traffic that passes through it. Static
+groups and offline evals give it a safe starting point. After that, each tenant's
+router learns which compliant model actually solves each kind of request most
+cheaply, using that tenant's own outcomes.
+
+```
+ prompt ──> features ──> learner picks among ──> call ──> outcome signals ──> learner update
+           (local)      policy-allowed models            implicit / explicit /   (per tenant,
+                        (explore ≤ budget)               shadow eval              versioned)
+```
+
+**Where learning runs (principles P2 and P8).** Prompts are turned into features inside the
+customer's environment, in the gateway or in SDK local mode. Features are a local
+embedding plus the complexity features from §6.2 (tokens, code, schema, language,
+use case). The learner state lives there too. The collector and registry receive only
+the decision and outcome metadata in §7.12, never prompt text or embeddings.
+Cross-tenant learning is **off**; see open question 7.
+
+**Outcome signals (collected from phase P1, used from phase P2):**
+
+| Signal | Source | Strength |
+|---|---|---|
+| Implicit failure | Fallback triggered, invalid JSON/schema, tool-call parse error, refusal, truncation at `max_tokens` | Strong negative |
+| Implicit dissatisfaction | Same `session_id` re-asks a near-duplicate prompt within N seconds (regenerate), or the caller retries | Weak negative |
+| Explicit feedback | `client.feedback(call_id, score, reason=None)` in the SDK; `POST /v1/feedback` on the gateway | Strong, sparse |
+| Shadow eval | A sampled share of calls (default 1–2%, capped by a budget) is also run on one alternative **compliant** model. A policy-constrained judge compares the two answers. The user only ever sees the primary answer. | Strong, costs money |
+| Cost and latency | Reported usage (§7.10), measured latency | Exact |
+
+**Learner.**
+- A **contextual bandit** per (tenant, use case), with the prompt features as context
+  and the eligible models as arms.
+- Reward = quality score − λ·cost − μ·latency. λ and μ are set per use case from the
+  `quality` intent: `critical` weights quality almost entirely.
+- Thompson sampling is the default. It is interpretable and cheap: under 1 ms on the
+  hot path.
+- The RouteLLM-style matrix-factorisation router is retrained periodically from the
+  accumulated (prompt features, model, score) tuples. It serves as a prior for cold-start
+  use cases.
+
+**Guardrails.** The learner can only *re-rank* inside the safe set. It never widens that set.
+- The arms are only models that pass the data-policy constraint (§6.2 step 3) **and**
+  the use case's quality bar (§7.3). The policy, not the learner, decides eligibility.
+- **Exploration budget:** at most `explore_rate` of traffic (default 5%, and 0 for
+  `restricted` or `min_group: frontier` use cases) is routed off the current best arm.
+- **Auto-rollback:** if a use case's rolling quality score falls below its parity
+  threshold, or its implicit-failure rate rises by more than X points, the learner
+  reverts to the last good snapshot and alerts.
+- **Versioned and auditable:** every learner snapshot gets a `learner_version`. Every
+  decision records the version and whether it was an exploration. Savings reports state
+  which versions were live, so the audited baseline (§7.10) stays valid.
+- **Poisoning resistance:** explicit feedback is rate-limited per user, and implicit
+  signals are weighted below shadow-eval scores. A shift in reward distribution
+  freezes learning and raises an alert.
+
+**Rollout modes (per tenant and use case):**
+1. `observe`: collect signals only (P1).
+2. `recommend`: the learner runs in shadow and proposes policy changes, with projected
+   savings and quality from off-policy evaluation over logged traffic. A human accepts
+   or rejects each one in the registry (P2).
+3. `auto`: the learner routes live inside the guardrails above (P3). It is enabled only
+   after `recommend` has been accurate for that use case for a set period.
+
+**Offline/online symmetry.** The teardown toolkit (§7.6) produces the same
+(features, model, score) tuples from historical logs. A pilot therefore starts from a
+warm learner instead of a cold one, and the teardown's projected savings can be compared
+directly against what the live learner later delivers.
 
 ## 8. Phases, gates and the 6-week test
 
@@ -384,9 +460,9 @@ with `savings_usd`, `sovereign_share` and `fallback_rate`.
 |---|---|---|---|
 | **P0 — Teardown MVP** | 0–3 | Fix served-model pricing; catalog v1 with cache, reasoning and sovereignty fields; streaming usage; Nordic ID detectors; policy schema v1 and golden vectors; teardown CLI (cost-only mode first, then replay + eval harness v0) | Two concierge teardowns delivered to pipeline accounts (memo: Storebrand, Tetra Tech, CluePoints, Svanemerket, SELENCIA) |
 | **Gate 1 (memo)** | 4–6 | — | **Go:** ≥3 of 10 prospects spend more than €5k/month; ≥2 teardowns show ≥30% savings at ≥95% parity; ≥1 paid pilot or LOI. **Kill:** buyers see cost as Microsoft's problem, or teardown savings are <15% → drop routing, keep P0 cost accuracy, move straight to P2 governance (idea B). |
-| **P1 — Sensitivity-aware routing** | 6–12 | Gateway router gets a sensitivity input and the constraint stage; OpenAI-compatible sovereign provider adapter; failover engine + circuit breakers; SDK `ShieldsRouter` local mode; counterfactual cost + baseline; telemetry + migration | A pilot customer runs in production behind the gateway; zero jurisdiction violations in property tests and in the pilot; invoice reconciliation within ±2% |
-| **P2 — Governance & cache** | 10–16 | Budgets (gateway shared store, SDK Redis store); anomaly alerts; FOCUS export; semantic cache mode; savings dashboards in the registry API | The pilot's FinOps owner uses budgets and alerts; cache savings reported |
-| **P3 — Learned routing & anonymise-then-route** | 16+ | RouteLLM-style learned strategy trained on pilot telemetry plus the eval harness; reversible pseudonymisation behind a recall gate | The learned router beats the heuristic on the eval set; the recall target is met before anonymisation is enabled for any tenant |
+| **P1 — Sensitivity-aware routing** | 6–12 | Gateway router gets a sensitivity input and the constraint stage; OpenAI-compatible sovereign provider adapter; failover engine + circuit breakers; SDK `ShieldsRouter` local mode; counterfactual cost + baseline; telemetry + migration; **learning signals in `observe` mode**: `call_id` + feedback API, implicit outcome capture, local prompt features, shadow-eval sampler | A pilot customer runs in production behind the gateway; zero jurisdiction violations in property tests and in the pilot; invoice reconciliation within ±2% |
+| **P2 — Governance & cache** | 10–16 | Budgets (gateway shared store, SDK Redis store); anomaly alerts; FOCUS export; semantic cache mode; savings dashboards in the registry API; **contextual-bandit learner in `recommend` mode** with off-policy evaluation, versioned snapshots and teardown warm-start | The pilot's FinOps owner uses budgets and alerts; cache savings reported; ≥1 learner recommendation accepted, with realised savings within ±5 points of projection |
+| **P3 — Autonomous learning & anonymise-then-route** | 16+ | Learner `auto` mode with exploration budget and auto-rollback; periodic RouteLLM-style retrain as cold-start prior; reversible pseudonymisation behind a recall gate | In `auto` mode the learner beats the static policy on cost at equal parity for 4 consecutive weeks with zero rollbacks caused by quality; the recall target is met before anonymisation is enabled for any tenant |
 
 ## 9. Success metrics
 
@@ -397,6 +473,9 @@ with `savings_usd`, `sovereign_share` and `fallback_rate`.
 - **Accuracy:** cost within ±2% of the invoice for the reconciled period.
 - **Reliability:** ≥99% success with one provider forced down (failover test).
 - **Overhead:** under 10 ms p50 for classify + route at the gateway, with no network I/O on the hot path.
+- **Learning:** month-over-month cost per solved task falls for each pilot use case at
+  constant parity. Fewer than 1 auto-rollback per use case per month. Exploration stays
+  within budget.
 - **Commercial:** paid pilots or LOIs; share of revenue from savings-share contracts.
 
 ## 10. Risks
@@ -410,6 +489,8 @@ with `savings_usd`, `sovereign_share` and `fallback_rate`.
 | Savings claims disputed | Frozen baseline, versioned catalog, invoice reconciliation, methodology appendix |
 | Focus dilution versus the ASPM roadmap | Phase 0 is mostly tooling (catalog, cost fix, teardown), which is useful even on the kill path; online routing is built only after Gate 1 |
 | Breaking the "the SDK never picks a model" contract | Local routing is opt-in through `ShieldsRouter`; existing clients unchanged; docs updated in the P1 PR |
+| The learner drifts or is gamed (feedback poisoning, reward hacking toward cheap models) | Only re-ranks the policy-safe set; exploration budget; auto-rollback; shadow evals outweigh implicit signals; versioned snapshots; `recommend` before `auto` |
+| Learning data becomes a privacy liability | Features and learner state stay in the customer's environment; only metadata reaches the collector; no cross-tenant learning by default |
 | Secondary-source market data | Validate before investor or external use (memo risk list) |
 
 ## 11. Open questions
@@ -426,6 +507,12 @@ with `savings_usd`, `sovereign_share` and `fallback_rate`.
    Proposal: allowed only when `us_cloud_act_exposure` is accepted by the customer policy.
 6. Savings-share baseline: the customer's actual historical mix, or a list-price
    "naive" baseline? Proposal: the historical mix, frozen at onboarding.
+7. Cross-tenant learning: should anonymised outcome statistics (model × task-type win
+   rates, no prompt features) be pooled across opted-in tenants, to warm-start new
+   customers? Proposal: no in P1–P2, revisit with legal in P3.
+8. Shadow-eval spend: is it paid by the customer (their keys), or credited against the
+   savings share? Proposal: the customer's keys, capped at 2% of routed spend and shown
+   in the savings report.
 
 ## Appendix A — Research notes
 
