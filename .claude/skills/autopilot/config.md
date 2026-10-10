@@ -19,14 +19,15 @@ changes here in its self-improve PR, within the limits in `SKILL.md`.
 | Key | Value | Notes |
 |---|---|---|
 | `lock_ttl` | 90 minutes | A `LOCK` older than this is stale and may be taken over. |
-| `merge_cooloff` | 2 hours | Minimum time a PR is open before autopilot merges it. |
+| `phase_cutoff` | 60 minutes | After holding the lock this long, start no new phase; go to the retro. Must stay well under `lock_ttl`. |
+| `merge_cooloff` | 2 hours | Minimum time since the PR was marked ready for review before autopilot merges it. |
 | `journal_lookback` | 24 entries | Roughly the last day of ticks. |
 | `learning_threshold` | 2 | Repeats of a surprise before it becomes a lesson. |
 
 ## Labels
 
-Create any that are missing on first use.
-
+Create any that are missing on first use, except `autopilot:journal`: a human
+creates the journal issue and labels it (see `ROUTINE.md`).
 | Label | Meaning |
 |---|---|
 | `autopilot:ready` | Human-approved: autopilot may pick this issue up. |
@@ -43,7 +44,25 @@ Create any that are missing on first use.
 
 Autopilot only picks up issues a human has labelled `autopilot:ready`. It may
 *suggest* the label in a comment on issues it thinks are a good fit, but never
-applies it itself.
+applies it itself. The same goes for `autopilot:merge-ok`; and autopilot never
+removes `autopilot:pause` or `autopilot:needs-human` (SKILL.md rule 8).
+
+## Identity
+
+| Key | Value | Notes |
+|---|---|---|
+| `trusted_associations` | `OWNER`, `MEMBER`, `COLLABORATOR` | Only these users' comments, labels, reviews and locks count. |
+| `autopilot_login` | *(unset)* | Set to a dedicated bot account or GitHub App login once autopilot has one. Until then autopilot posts as a maintainer, so it cannot prove a label was added by a human; rule 8 and the journal's label log are the only guards. With it set, permission labels and reviews are checked against the event actor. |
+
+## Instruction files
+
+Files this loop reads as rules. Autopilot never merges a PR that touches any of
+them (SKILL.md rule 4), and any PR touching them is high risk:
+
+- `.claude/**`
+- `**/CLAUDE.md` (including `gateway/CLAUDE.md`)
+- `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`
+- `.github/**`
 
 ## Risk classes
 
@@ -52,14 +71,17 @@ A PR is **high** risk if it touches any of these, otherwise **low**:
 - `packages/db/alembic/**`, `packages/db/models.py` — schema and migrations
 - Telemetry payload shapes: `packages/sdk/prompt_shields/**` event/telemetry
   fields, `gateway/src/middlewares/ps-telemetry.ts` — privacy contract
-- Upstream Portkey files in `gateway/` (anything not listed as ours in
-  `gateway/FORK_NOTICE.md`) — fork divergence
+- Upstream Portkey files in `gateway/` — fork divergence. Ours (not
+  upstream, so not high risk on this count): `gateway/src/middlewares/ps-*`,
+  `gateway/src/middlewares/router/**`, `gateway/src/middlewares/cache/**`,
+  `gateway/src/middlewares/PS_README.md`, and anything `gateway/FORK_NOTICE.md`
+  lists as added by Prompt Shields.
 - Authentication / API keys: collector auth, `api_key_fingerprint`
 - Public SDK API removals or signature changes — semver
 - `LICENSE`, `NOTICE`, `gateway/LICENSE`, `SECURITY.md`
-- `.github/**`, `docker-compose.yml`, `Dockerfile`s, `pyproject.toml`
+- Any instruction file (above)
+- `docker-compose.yml`, `Dockerfile`s, `pyproject.toml`
   dependency changes, `package.json` / lockfile dependency changes
-- `.claude/**`
 - More than 400 changed lines excluding tests and lockfiles
 
 High-risk PRs need `autopilot:merge-ok` from a human before autopilot merges.
