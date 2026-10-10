@@ -10,7 +10,7 @@ changes here in its self-improve PR, within the limits in `SKILL.md`.
 | `max_new_issues_per_tick` | 1 | New implementation PRs started per tick. |
 | `max_open_autopilot_prs` | 3 | Stop picking up issues at this many open autopilot PRs. |
 | `max_reviews_per_tick` | 3 | |
-| `max_merges_per_tick` | 2 | |
+| `max_merges_per_tick` | 0 | Merging off until the hardening from PR #49's review lands. Raise to 2 to turn on. |
 | `max_minutes_per_issue` | 35 | Then push a draft and label `autopilot:blocked`. |
 | `max_fix_attempts` | 3 | Consecutive ticks a PR may stay red before `autopilot:needs-human`. |
 
