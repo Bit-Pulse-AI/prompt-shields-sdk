@@ -10,7 +10,7 @@ changes here in its self-improve PR, within the limits in `SKILL.md`.
 | `max_new_issues_per_tick` | 1 | New implementation PRs started per tick. |
 | `max_open_autopilot_prs` | 3 | Stop picking up issues at this many open autopilot PRs. |
 | `max_reviews_per_tick` | 3 | |
-| `max_merges_per_tick` | 0 | Merging off until the hardening from PR #49's review lands. Raise to 2 to turn on. |
+| `max_merges_per_tick` | 0 | Merging off. Raise (e.g. to 2) only after setting `autopilot_login` (SKILL.md rule 11). |
 | `max_minutes_per_issue` | 35 | Then push a draft and label `autopilot:blocked`. |
 | `max_fix_attempts` | 3 | Consecutive ticks a PR may stay red before `autopilot:needs-human`. |
 
@@ -19,7 +19,7 @@ changes here in its self-improve PR, within the limits in `SKILL.md`.
 | Key | Value | Notes |
 |---|---|---|
 | `lock_ttl` | 90 minutes | A `LOCK` older than this is stale and may be taken over. |
-| `phase_cutoff` | 60 minutes | After holding the lock this long, start no new phase; go to the retro. Must stay well under `lock_ttl`. |
+| `phase_cutoff` | 40 minutes | After holding the lock this long, start no new phase; go to the retro. `phase_cutoff` + `max_minutes_per_issue` + a few minutes for the retro must stay under `lock_ttl`. |
 | `merge_cooloff` | 2 hours | Minimum time since the PR was marked ready for review before autopilot merges it. |
 | `journal_lookback` | 24 entries | Roughly the last day of ticks. |
 | `learning_threshold` | 2 | Repeats of a surprise before it becomes a lesson. |
@@ -62,7 +62,7 @@ Files this loop reads as rules. Autopilot never merges a PR that touches any of
 them (SKILL.md rule 4), and any PR touching them is high risk:
 
 - `.claude/**`
-- `**/CLAUDE.md` (including `gateway/CLAUDE.md`)
+- `**/CLAUDE.md`
 - `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`
 - `.github/**`
 

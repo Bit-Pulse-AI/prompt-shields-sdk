@@ -73,5 +73,6 @@ Autopilot never merges changes to this directory itself.
 - **Start slow:** `max_merges_per_tick` ships as 0. Read the reviews it writes
   for a few days. To turn merging on, first give autopilot its own GitHub
   identity and set `autopilot_login`, then raise `max_merges_per_tick` (rule 11
-  keeps merging off without one). The dispatcher skips an
-  hour while the previous tick is still running, so ticks never overlap.
+  keeps merging off without one). Overlapping ticks are prevented by the
+  journal `LOCK`; the dispatcher also tries to skip an hour while the previous
+  tick is still running, but the lock is the real guard.

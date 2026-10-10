@@ -40,7 +40,8 @@ Files in this skill:
    rules this loop obeys; changes to them go through a PR a human merges.
 5. **Respect the kill switch.** If the journal issue carries
    `autopilot:pause`, post one comment `PAUSED <ISO timestamp> <session link>`
-   and end the tick — no `LOCK`, no `UNLOCK`, no phase 7. If no issue carries
+   (skip it if the journal's latest comment is already a `PAUSED` line, so a
+   long pause does not flood the journal) and end the tick — no `LOCK`, no `UNLOCK`, no phase 7. If no issue carries
    `autopilot:journal`, treat that as paused too, but write nothing anywhere:
    do not create a journal (a human creates it; see `ROUTINE.md`).
 6. Follow `CONTRIBUTING.md` for every code change (suites, CHANGELOG,
@@ -175,7 +176,9 @@ Skip this phase if there are already `max_open_autopilot_prs` open autopilot
 PRs — finish what is in flight before starting more.
 
 1. **Select.** Open issues labelled `autopilot:ready` by a trusted user (when
-   `autopilot_login` is set, the label event's actor must not be it), not labelled
+   `autopilot_login` is set, the label event's actor must not be it; when it is
+   not set, skip any issue whose `autopilot:ready` appears under `Labels:` in
+   an autopilot journal entry), not labelled
    `autopilot:claimed`, `autopilot:blocked`, `autopilot:needs-human` or
    `security`, with no open PR linking them. Order by priority label
    (`priority:high` > none > `priority:low`), then oldest first.
@@ -193,8 +196,8 @@ PRs — finish what is in flight before starting more.
 7. **Push and open a draft PR** labelled `autopilot`, body: what changed, why,
    `Closes #<n>`, suites run with results, risk class, anything the reviewer
    should look at, and a line `Autopilot-Session: <session link>` (this is part
-   of what identifies an autopilot PR in phase 1). End commit messages and the PR body with the
-   attribution lines the session supplies.
+   of what identifies an autopilot PR in phase 1). End commit messages and the
+   PR body with the attribution lines the session supplies.
 8. Subscribe to the PR's activity if the tool exists, so a later tick or
    event can drive it.
 
