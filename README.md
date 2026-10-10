@@ -81,7 +81,7 @@ Prompt Shields separates *collection* from *inventory*. Several independent coll
 
 | Captured | Notes |
 |---|---|
-| Vendor, model, tokens, latency, cost | Built-in pricing table for OpenAI, Anthropic and Google models |
+| Vendor, model, tokens, latency, cost | Bundled model catalog: OpenAI, Anthropic, Google, plus EU-hosted Mistral, Scaleway and OVHcloud models |
 | Ownership metadata | Business unit, use case, owner, environment, data classification |
 | PII categories | `email`, `phone`, `ssn`, `credit_card`, `ip_address`, `iban`, `health_data`, `financial_data` — categories only, never the matched value |
 | Tool and function calls | OpenAI `tool_calls` and Anthropic `tool_use` blocks |
@@ -129,7 +129,7 @@ This is a discovery and inventory tool. It is not a control, and the statements 
 
 **Semantic search calls OpenAI.** When `OPENAI_API_KEY` is set on the collector, asset metadata — vendor, model, use case, business unit — is sent to OpenAI's embeddings API (`text-embedding-3-small`) to build the search index. Leave the variable unset and embeddings are skipped, disabling `/search` but keeping asset metadata inside your network.
 
-**Cost figures are estimates.** Computed from a local pricing table against observed token counts. They will not reconcile to a provider invoice, and the table must be kept current by hand.
+**Cost figures are estimates.** They are computed from a bundled price catalog against observed token counts. They will not reconcile to a provider invoice. Cached and reasoning tokens are not yet priced separately. The catalog is a dated snapshot of the LiteLLM price map; it is regenerated with `scripts/build_catalog.py`, not refreshed at runtime.
 
 **Shadow AI capture is not in this repository.** The browser extensions and macOS app that detect employees using ChatGPT, Gemini, and Copilot are separate products. Cloning this repository gives you developer-side and infrastructure-side discovery only.
 
