@@ -8,6 +8,12 @@ Returns USD as a Decimal-compatible float. Returns None when the model is
 unknown — the collector treats None cost as "unmetered" rather than zero.
 """
 
+import re
+
+# Providers echo dated snapshots ("gpt-4o-2024-08-06") for undated requests.
+# When the snapshot itself is not in the table, price it at its base model.
+_DATE_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+
 # (input_per_1k_tokens, output_per_1k_tokens) in USD
 # Source: public pricing pages as of 2026-Q1. Override at runtime if needed.
 DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
@@ -52,6 +58,8 @@ def estimate_cost(
 
     table = pricing_table if pricing_table is not None else DEFAULT_PRICING
     rates = table.get((vendor, model))
+    if rates is None:
+        rates = table.get((vendor, _DATE_SUFFIX.sub("", model)))
     if rates is None:
         return None
 
